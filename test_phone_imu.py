@@ -1,8 +1,15 @@
 """
-POC Streamlit app: run BioMAT on phyphox phone-IMU shank CSV for level-ground walking.
+POC Streamlit app: run BioMAT on phyphox phone-IMU recordings for level-ground walking.
 
-Expected phyphox columns (names are matched flexibly):
-  Time (s), Acceleration x/y/z (m/s^2), Gyroscope x/y/z (rad/s)
+Phyphox records either acceleration OR gyroscope in one export (not both). Supported inputs:
+  - Acceleration CSV/Excel: Time (s), Acceleration x/y/z (m/s^2) [, Absolute acceleration]
+  - Gyroscope CSV/Excel:    Time (s), Gyroscope x/y/z (rad/s or deg/s)
+  - Optional second file for the missing modality (aligned onto the primary time base)
+
+Missing accel or gyro channels are zero-filled so each placed IMU still has 6 features
+(Accel_XYZ + Gyro_XYZ). Choose a sensor configuration like biomat_app.py; the phone
+recording is written into one selected placement (foot/shank/thigh), and any other
+sensors in that config are zero-filled.
 
 Run:
   streamlit run test_phone_imu.py
@@ -32,20 +39,32 @@ TARGET_FS = 100.0
 WINSIZE = 256
 OVERLAP = 0.5
 JOINT_NAMES = ["Hip flexion", "Knee", "Ankle"]
-SHANK_CHANNELS = [
-    "shank_Accel_X",
-    "shank_Accel_Y",
-    "shank_Accel_Z",
-    "shank_Gyro_X",
-    "shank_Gyro_Y",
-    "shank_Gyro_Z",
-]
-# Camargo / BioMAT sensor packing order for the full 3-IMU model.
-FULL_SENSOR_ORDER = ["foot", "shank", "thigh"]
-
-SHANK_MODEL = "shank_transformertsai_g1g2rardsasd_g1g2rardsasd.pt"
-FULL_MODEL = "transformertsai_g1g2rardsasd_g1g2rardsasd.pt"
+FEATURES_PER_SENSOR = 6
 MODEL_DIR = os.path.join(".", "caches", "trained_model")
+MODEL_STEM = "transformertsai_g1g2rardsasd_g1g2rardsasd.pt"
+
+# Same options as biomat_app.py
+SENSOR_OPTIONS = {
+    "Thigh & Shank & Foot": ["foot", "shank", "thigh"],
+    "Thigh & Shank": ["thigh", "shank"],
+    "Thigh & Foot": ["thigh", "foot"],
+    "Shank & Foot": ["shank", "foot"],
+    "Thigh": ["thigh"],
+    "Shank": ["shank"],
+    "Foot": ["foot"],
+}
+SENSOR_FILE_KEYS = {
+    "Thigh & Shank & Foot": "thighshankfoot",
+    "Thigh & Shank": "thighshank",
+    "Thigh & Foot": "thighfoot",
+    "Shank & Foot": "shankfoot",
+    "Thigh": "thigh",
+    "Shank": "shank",
+    "Foot": "foot",
+}
+
+ACC_KEYS = ["acc_x", "acc_y", "acc_z"]
+GYRO_KEYS = ["gyro_x", "gyro_y", "gyro_z"]
 
 
 def _norm(col: str) -> str:
@@ -59,7 +78,8 @@ def _find_column(columns: List[str], patterns: List[str]) -> Optional[str]:
         if key in normalized:
             return normalized[key]
         for ncol, original in normalized.items():
-            if key in ncol:
+            # Prefer exact-ish matches; skip "absoluteacceleration" for axis patterns.
+            if key in ncol and "absolute" not in ncol:
                 return original
     return None
 
@@ -68,18 +88,30 @@ def detect_phyphox_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     cols = list(df.columns)
     return {
         "time": _find_column(cols, ["Time (s)", "time", "t"]),
-        "acc_x": _find_column(cols, ["Acceleration x (m/s^2)", "Acceleration x", "Linear Acceleration x", "ax", "accx"]),
-        "acc_y": _find_column(cols, ["Acceleration y (m/s^2)", "Acceleration y", "Linear Acceleration y", "ay", "accy"]),
-        "acc_z": _find_column(cols, ["Acceleration z (m/s^2)", "Acceleration z", "Linear Acceleration z", "az", "accz"]),
+        "acc_x": _find_column(
+            cols,
+            ["Acceleration x (m/s^2)", "Acceleration x (m/s²)", "Acceleration x", "Linear Acceleration x", "ax", "accx"],
+        ),
+        "acc_y": _find_column(
+            cols,
+            ["Acceleration y (m/s^2)", "Acceleration y (m/s²)", "Acceleration y", "Linear Acceleration y", "ay", "accy"],
+        ),
+        "acc_z": _find_column(
+            cols,
+            ["Acceleration z (m/s^2)", "Acceleration z (m/s²)", "Acceleration z", "Linear Acceleration z", "az", "accz"],
+        ),
         "gyro_x": _find_column(cols, ["Gyroscope x (rad/s)", "Gyroscope x (deg/s)", "Gyroscope x", "wx", "gyrox"]),
         "gyro_y": _find_column(cols, ["Gyroscope y (rad/s)", "Gyroscope y (deg/s)", "Gyroscope y", "wy", "gyroy"]),
         "gyro_z": _find_column(cols, ["Gyroscope z (rad/s)", "Gyroscope z (deg/s)", "Gyroscope z", "wz", "gyroz"]),
     }
 
 
-def load_phyphox_csv(file_bytes: bytes) -> pd.DataFrame:
+def load_phyphox_table(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """Load phyphox CSV or Excel export."""
+    name = filename.lower()
     buffer = io.BytesIO(file_bytes)
-    # Phyphox sometimes writes a metadata header before the column names.
+    if name.endswith((".xlsx", ".xls")):
+        return pd.read_excel(buffer)
     try:
         return pd.read_csv(buffer)
     except Exception:
@@ -87,37 +119,79 @@ def load_phyphox_csv(file_bytes: bytes) -> pd.DataFrame:
         return pd.read_csv(buffer, comment="#")
 
 
+def _has_group(mapping: Dict[str, Optional[str]], keys: List[str]) -> bool:
+    return all(mapping.get(k) for k in keys)
+
+
+def modality_status(mapping: Dict[str, Optional[str]]) -> Tuple[bool, bool]:
+    return _has_group(mapping, ACC_KEYS), _has_group(mapping, GYRO_KEYS)
+
+
 def extract_imu_arrays(
     df: pd.DataFrame,
-    mapping: Dict[str, str],
+    mapping: Dict[str, Optional[str]],
     gyro_in_deg: bool,
-) -> Tuple[np.ndarray, np.ndarray]:
-    required = ["time", "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"]
-    missing = [k for k in required if not mapping.get(k)]
-    if missing:
-        raise ValueError(f"Missing required columns for: {', '.join(missing)}")
+) -> Tuple[np.ndarray, np.ndarray, bool, bool]:
+    """
+    Build (time, imu[N,6]) = Accel XYZ + Gyro XYZ.
+    Missing accel or gyro group is zero-filled (phyphox single-modality exports).
+    """
+    if not mapping.get("time"):
+        raise ValueError("Missing required Time (s) column.")
+
+    has_acc, has_gyro = modality_status(mapping)
+    if not has_acc and not has_gyro:
+        raise ValueError(
+            "Need Acceleration x/y/z and/or Gyroscope x/y/z. "
+            "Phyphox usually exports one modality per file."
+        )
 
     time = df[mapping["time"]].to_numpy(dtype=float)
-    imu = np.column_stack(
-        [
-            df[mapping["acc_x"]].to_numpy(dtype=float),
-            df[mapping["acc_y"]].to_numpy(dtype=float),
-            df[mapping["acc_z"]].to_numpy(dtype=float),
-            df[mapping["gyro_x"]].to_numpy(dtype=float),
-            df[mapping["gyro_y"]].to_numpy(dtype=float),
-            df[mapping["gyro_z"]].to_numpy(dtype=float),
-        ]
-    )
-    if gyro_in_deg:
-        imu[:, 3:] = np.deg2rad(imu[:, 3:])
+    n = len(time)
+    imu = np.zeros((n, 6), dtype=float)
 
-    # Drop non-finite / non-monotonic time samples.
+    if has_acc:
+        imu[:, 0] = df[mapping["acc_x"]].to_numpy(dtype=float)
+        imu[:, 1] = df[mapping["acc_y"]].to_numpy(dtype=float)
+        imu[:, 2] = df[mapping["acc_z"]].to_numpy(dtype=float)
+
+    if has_gyro:
+        imu[:, 3] = df[mapping["gyro_x"]].to_numpy(dtype=float)
+        imu[:, 4] = df[mapping["gyro_y"]].to_numpy(dtype=float)
+        imu[:, 5] = df[mapping["gyro_z"]].to_numpy(dtype=float)
+        if gyro_in_deg:
+            imu[:, 3:] = np.deg2rad(imu[:, 3:])
+
     valid = np.isfinite(time) & np.all(np.isfinite(imu), axis=1)
     time, imu = time[valid], imu[valid]
     order = np.argsort(time)
     time, imu = time[order], imu[order]
     keep = np.concatenate([[True], np.diff(time) > 0])
-    return time[keep], imu[keep]
+    return time[keep], imu[keep], has_acc, has_gyro
+
+
+def merge_secondary_modality(
+    time_primary: np.ndarray,
+    imu_primary: np.ndarray,
+    has_acc: bool,
+    has_gyro: bool,
+    df_secondary: pd.DataFrame,
+    mapping_secondary: Dict[str, Optional[str]],
+    gyro_in_deg: bool,
+) -> Tuple[np.ndarray, bool, bool]:
+    """Interpolate the missing modality from a second phyphox file onto primary time."""
+    t2, imu2, sec_acc, sec_gyro = extract_imu_arrays(df_secondary, mapping_secondary, gyro_in_deg)
+    imu = imu_primary.copy()
+
+    if not has_acc and sec_acc:
+        for i in range(3):
+            imu[:, i] = np.interp(time_primary, t2, imu2[:, i])
+        has_acc = True
+    if not has_gyro and sec_gyro:
+        for i in range(3, 6):
+            imu[:, i] = np.interp(time_primary, t2, imu2[:, i])
+        has_gyro = True
+    return imu, has_acc, has_gyro
 
 
 def resample_imu(time: np.ndarray, imu: np.ndarray, target_fs: float = TARGET_FS) -> Tuple[np.ndarray, np.ndarray]:
@@ -145,29 +219,44 @@ def segment_windows(signal: np.ndarray, winsize: int = WINSIZE, overlap: float =
     return np.asarray(windows, dtype=float)
 
 
-def expand_shank_to_full(shank_windows: np.ndarray) -> np.ndarray:
-    """Pack shank (6) into foot/shank/thigh (18) with zeros for missing IMUs."""
-    n, t, _ = shank_windows.shape
-    full = np.zeros((n, t, 18), dtype=float)
-    # foot=0:6, shank=6:12, thigh=12:18
-    full[:, :, 6:12] = shank_windows
-    return full
+def pack_phone_into_sensors(
+    phone_windows: np.ndarray,
+    selected_sensors: List[str],
+    phone_placement: str,
+) -> np.ndarray:
+    """
+    Pack one phone IMU (N, T, 6) into the selected sensor channel layout.
+    Channel order matches LoadPickleDataSet.combine_sensors_features for selected_sensors.
+    """
+    if phone_placement not in selected_sensors:
+        raise ValueError(
+            f"Phone placement '{phone_placement}' is not in selected sensors {selected_sensors}."
+        )
+    n, t, c = phone_windows.shape
+    if c != FEATURES_PER_SENSOR:
+        raise ValueError(f"Expected {FEATURES_PER_SENSOR} phone channels, got {c}.")
+
+    n_sensors = len(selected_sensors)
+    packed = np.zeros((n, t, n_sensors * FEATURES_PER_SENSOR), dtype=float)
+    slot = selected_sensors.index(phone_placement)
+    start = slot * FEATURES_PER_SENSOR
+    packed[:, :, start : start + FEATURES_PER_SENSOR] = phone_windows
+    return packed
 
 
-def resolve_model_path() -> Tuple[str, str, bool]:
-    """
-    Returns (path, label, use_full_padding).
-    Prefer a true shank-only checkpoint; fall back to the available 3-IMU model.
-    """
-    shank_path = os.path.join(MODEL_DIR, SHANK_MODEL)
-    full_path = os.path.join(MODEL_DIR, FULL_MODEL)
-    if os.path.isfile(shank_path):
-        return shank_path, "shank-only BioMAT", False
-    if os.path.isfile(full_path):
-        return full_path, "full BioMAT (foot/thigh zero-filled)", True
-    raise FileNotFoundError(
-        f"No BioMAT checkpoint found. Expected `{SHANK_MODEL}` or `{FULL_MODEL}` in {MODEL_DIR}."
-    )
+def resolve_model_path(sensor_label: str) -> Tuple[str, str]:
+    """Return (path, display_label) for the BioMAT checkpoint matching biomat_app naming."""
+    key = SENSOR_FILE_KEYS[sensor_label]
+    if key == "thighshankfoot":
+        model_file = MODEL_STEM
+    else:
+        model_file = f"{key}_{MODEL_STEM}"
+    path = os.path.join(MODEL_DIR, model_file)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"No checkpoint for '{sensor_label}'. Expected `{model_file}` in {MODEL_DIR}."
+        )
+    return path, f"BioMAT ({sensor_label})"
 
 
 @st.cache_resource
@@ -245,8 +334,12 @@ def plot_stitched(y_pred: np.ndarray, flip_sign: bool) -> go.Figure:
     return fig
 
 
-def plot_imu_preview(time: np.ndarray, imu: np.ndarray) -> go.Figure:
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, subplot_titles=["Acceleration (m/s²)", "Gyro (rad/s)"])
+def plot_imu_preview(time: np.ndarray, imu: np.ndarray, has_acc: bool, has_gyro: bool) -> go.Figure:
+    titles = [
+        "Acceleration (m/s²)" + ("" if has_acc else " — zero-filled"),
+        "Gyro (rad/s)" + ("" if has_gyro else " — zero-filled"),
+    ]
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, subplot_titles=titles)
     labels_acc = ["Ax", "Ay", "Az"]
     labels_gyro = ["Gx", "Gy", "Gz"]
     for i in range(3):
@@ -256,12 +349,29 @@ def plot_imu_preview(time: np.ndarray, imu: np.ndarray) -> go.Figure:
     return fig
 
 
+def _mapping_ui(raw_df: pd.DataFrame, detected: Dict[str, Optional[str]], key_prefix: str) -> Dict[str, Optional[str]]:
+    st.subheader("Column mapping")
+    cols = ["—"] + list(raw_df.columns)
+    mapping: Dict[str, Optional[str]] = {}
+    map_cols = st.columns(4)
+    keys = ["time", "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"]
+    labels = ["Time", "Acc X", "Acc Y", "Acc Z", "Gyro X", "Gyro Y", "Gyro Z"]
+    for i, (key, label) in enumerate(zip(keys, labels)):
+        default = detected.get(key)
+        index = cols.index(default) if default in cols else 0
+        with map_cols[i % 4]:
+            choice = st.selectbox(label, cols, index=index, key=f"{key_prefix}_map_{key}")
+            mapping[key] = None if choice == "—" else choice
+    return mapping
+
+
 def main():
     st.set_page_config(page_title="BioMAT Phone IMU POC", layout="wide")
     st.title("BioMAT phone IMU POC")
     st.caption(
-        "Upload a phyphox shank IMU CSV, treat the trial as level-ground walking, "
-        "and predict hip / knee / ankle kinematics with BioMAT."
+        "Upload a phyphox recording (acceleration **or** gyroscope — phyphox exports one at a time), "
+        "choose a sensor configuration like BioMAT, place the phone on one segment, "
+        "and predict hip / knee / ankle kinematics. Missing modality / sensor channels are zero-filled."
     )
 
     config = get_config_universal("camargo")
@@ -270,59 +380,119 @@ def main():
     config["batch_size"] = min(int(config.get("batch_size", 50)), 32)
 
     with st.sidebar:
+        st.header("Sensor Configuration")
+        selected_sensor_label = st.selectbox(
+            "Pick one",
+            list(SENSOR_OPTIONS.keys()),
+            index=list(SENSOR_OPTIONS.keys()).index("Shank"),
+        )
+        selected_sensors = SENSOR_OPTIONS[selected_sensor_label]
+        config["selected_sensors"] = selected_sensors
+
+        default_placement = "shank" if "shank" in selected_sensors else selected_sensors[0]
+        phone_placement = st.selectbox(
+            "Phone placement (filled IMU)",
+            selected_sensors,
+            index=selected_sensors.index(default_placement),
+            help="Only one phone file is used; other sensors in the configuration are zero-filled.",
+        )
+        try:
+            model_path_preview, _ = resolve_model_path(selected_sensor_label)
+            st.caption(f"Checkpoint: `{os.path.basename(model_path_preview)}`")
+        except FileNotFoundError as exc:
+            st.error(str(exc))
+
         st.header("Input")
-        uploaded = st.file_uploader("Phyphox CSV (shank)", type=["csv"])
+        uploaded = st.file_uploader(
+            "Primary phyphox file (accel or gyro)",
+            type=["csv", "xlsx", "xls"],
+            key="primary_upload",
+        )
+        uploaded_secondary = st.file_uploader(
+            "Optional second file (other modality)",
+            type=["csv", "xlsx", "xls"],
+            key="secondary_upload",
+        )
         gyro_in_deg = st.checkbox("Gyro columns are in deg/s", value=False)
         flip_sign = st.checkbox("Flip prediction sign (Camargo convention)", value=True)
         st.markdown("**Activity:** Level ground walking")
         st.markdown(
-            "Phone axes rarely match Camargo IMU axes. This POC assumes your CSV "
-            "order is Accel XYZ then Gyro XYZ in a shank-mounted frame."
+            "Example accel export columns: `Time (s)`, `Acceleration x/y/z (m/s^2)`. "
+            "`Absolute acceleration` is ignored. Axes rarely match Camargo — treat this as a POC."
         )
 
     if uploaded is None:
-        st.info("Upload a phyphox CSV with time + accel + gyro columns to begin.")
+        st.info(
+            "Upload a phyphox CSV/Excel with **Time + Acceleration x/y/z** "
+            "(or Time + Gyroscope x/y/z) to begin."
+        )
         return
 
-    raw_df = load_phyphox_csv(uploaded.getvalue())
+    raw_df = load_phyphox_table(uploaded.getvalue(), uploaded.name)
     detected = detect_phyphox_columns(raw_df)
+    mapping = _mapping_ui(raw_df, detected, key_prefix="primary")
+    has_acc, has_gyro = modality_status(mapping)
 
-    st.subheader("Column mapping")
-    cols = ["—"] + list(raw_df.columns)
-    mapping = {}
-    map_cols = st.columns(4)
-    keys = ["time", "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"]
-    labels = ["Time", "Acc X", "Acc Y", "Acc Z", "Gyro X", "Gyro Y", "Gyro Z"]
-    for i, (key, label) in enumerate(zip(keys, labels)):
-        default = detected.get(key)
-        index = cols.index(default) if default in cols else 0
-        with map_cols[i % 4]:
-            choice = st.selectbox(label, cols, index=index, key=f"map_{key}")
-            mapping[key] = None if choice == "—" else choice
+    if has_acc and not has_gyro:
+        st.warning("Acceleration-only file detected — gyro channels will be zero-filled unless you add a second file.")
+    elif has_gyro and not has_acc:
+        st.warning("Gyroscope-only file detected — accel channels will be zero-filled unless you add a second file.")
+    elif has_acc and has_gyro:
+        st.success("Both acceleration and gyroscope columns mapped.")
+    else:
+        st.error("Map Time plus either Acceleration x/y/z or Gyroscope x/y/z.")
 
-    with st.expander("CSV preview", expanded=False):
+    with st.expander("Primary file preview", expanded=False):
         st.dataframe(raw_df.head(20), use_container_width=True)
+
+    mapping_secondary = None
+    raw_df_secondary = None
+    if uploaded_secondary is not None:
+        raw_df_secondary = load_phyphox_table(uploaded_secondary.getvalue(), uploaded_secondary.name)
+        detected_sec = detect_phyphox_columns(raw_df_secondary)
+        st.subheader("Secondary file mapping")
+        mapping_secondary = _mapping_ui(raw_df_secondary, detected_sec, key_prefix="secondary")
+        with st.expander("Secondary file preview", expanded=False):
+            st.dataframe(raw_df_secondary.head(20), use_container_width=True)
 
     if not st.button("Run BioMAT", type="primary"):
         return
 
     try:
-        time_raw, imu_raw = extract_imu_arrays(raw_df, mapping, gyro_in_deg=gyro_in_deg)
-        time_rs, imu_rs = resample_imu(time_raw, imu_raw, TARGET_FS)
-        shank_windows = segment_windows(imu_rs, WINSIZE, OVERLAP)
+        time_raw, imu_raw, has_acc, has_gyro = extract_imu_arrays(
+            raw_df, mapping, gyro_in_deg=gyro_in_deg
+        )
+        if raw_df_secondary is not None and mapping_secondary is not None:
+            imu_raw, has_acc, has_gyro = merge_secondary_modality(
+                time_raw,
+                imu_raw,
+                has_acc,
+                has_gyro,
+                raw_df_secondary,
+                mapping_secondary,
+                gyro_in_deg=gyro_in_deg,
+            )
 
-        model_path, model_label, use_full_padding = resolve_model_path()
-        if use_full_padding:
-            config["selected_sensors"] = FULL_SENSOR_ORDER
-            x_windows = expand_shank_to_full(shank_windows)
+        time_rs, imu_rs = resample_imu(time_raw, imu_raw, TARGET_FS)
+        phone_windows = segment_windows(imu_rs, WINSIZE, OVERLAP)
+
+        model_path, model_label = resolve_model_path(selected_sensor_label)
+        x_windows = pack_phone_into_sensors(phone_windows, selected_sensors, phone_placement)
+        config["selected_sensors"] = selected_sensors
+
+        zeroed = [s for s in selected_sensors if s != phone_placement]
+        if zeroed:
             st.warning(
                 f"Using `{os.path.basename(model_path)}` ({model_label}). "
-                "Only shank channels are filled; foot/thigh are zeros."
+                f"Phone fills **{phone_placement}**; zero-filled: {', '.join(zeroed)}."
             )
         else:
-            config["selected_sensors"] = ["shank"]
-            x_windows = shank_windows
-            st.success(f"Using `{os.path.basename(model_path)}` ({model_label}).")
+            st.success(f"Using `{os.path.basename(model_path)}` ({model_label}) on **{phone_placement}**.")
+
+        modality_note = []
+        modality_note.append("accel ✓" if has_acc else "accel zero-filled")
+        modality_note.append("gyro ✓" if has_gyro else "gyro zero-filled")
+        st.info(f"{phone_placement.capitalize()} modalities: " + ", ".join(modality_note))
 
         with st.spinner("Loading model…"):
             model = load_model(model_path)
@@ -341,7 +511,10 @@ def main():
         f"({duration_s:.1f}s) → {len(x_windows)} windows of {WINSIZE}."
     )
 
-    st.plotly_chart(plot_imu_preview(time_rs, imu_rs), use_container_width=True)
+    st.plotly_chart(
+        plot_imu_preview(time_rs, imu_rs, has_acc=has_acc, has_gyro=has_gyro),
+        use_container_width=True,
+    )
 
     st.subheader("Predicted joint angles")
     view = st.radio("View", ["Stitched trial", "Single window"], horizontal=True)
