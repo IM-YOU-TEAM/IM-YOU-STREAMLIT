@@ -24,18 +24,21 @@ def plot_kinematic_predictions(y_true, y_pred, label, selected_subject, selected
         selected_index = list(set(subject_index) & set(activity_index))
         y_pred_to_plot = y_pred[selected_index][selected_index_to_plot]
         y_true_to_plot = y_true[selected_index][selected_index_to_plot]
+        # Window samples @ 100 Hz → time in seconds
+        t_s = np.arange(y_true_to_plot.shape[0]) / 100.0
         for j, joint_name in enumerate(['Hip', 'Knee', 'Ankle']):
-            fig.append_trace(go.Scatter(x=np.arange(1, len(y_true)), y=-y_true_to_plot[:, j],
+            fig.append_trace(go.Scatter(x=t_s, y=-y_true_to_plot[:, j],
                                         mode='lines',
                                         name='True',
                                         line=dict(color=colors[5], dash='solid')),
                              row=a + 1, col=(j % 3) + 1)
-            fig.append_trace(go.Scatter(x=np.arange(1, len(y_true)),
+            fig.append_trace(go.Scatter(x=t_s,
                                         y=-y_pred_to_plot[:, j],
                                         mode='lines',
                                         name='Prediction',
                                         line=dict(color=colors[8], dash='dot')
                                         ), row=a + 1, col=(j % 3) + 1)
             fig.update_yaxes(title_text=joint_name + '(deg)', row=a + 1, col=(j % 3) + 1)
+            fig.update_xaxes(title_text='Time (s)', row=a + 1, col=(j % 3) + 1)
     fig.update_layout(height=900, width=800)
     return fig
