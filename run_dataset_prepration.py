@@ -1,6 +1,8 @@
 from utils.read_write import read_csv
 import os
 import pickle
+
+import pandas as pd
 from config import get_config_universal
 
 dataset_path = 'J:/dataset/CAMARGO_ET_AL_J_BIOMECH_DATASET/'
@@ -61,8 +63,8 @@ for datatype in datatype_list:
 
 if os.path.isfile(dataset_file):
     print('file exist')
-    with open(dataset_file, 'rb') as f:
-        dataset = pickle.load(f)
+    # pandas loader for DataFrames pickled with older pandas versions
+    dataset = pd.read_pickle(dataset_file)
 else:
     with open(dataset_file, 'wb') as f:
         pickle.dump(dataset, f, protocol=pickle.HIGHEST_PROTOCOL)

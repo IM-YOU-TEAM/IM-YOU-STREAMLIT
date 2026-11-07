@@ -7,6 +7,7 @@ from config import get_config_universal
 from dataset import DataSet
 from datasetbuilder import DataSetBuilder
 from test import Test
+from utils.pytorchtools import load_trained_model
 from visualization.steamlit_plot import plot_kinematic_predictions
 
 
@@ -23,7 +24,7 @@ sensor_options = {'Thigh & Shank & Foot': ['foot', 'shank', 'thigh'],
                   'Shank': ['shank'],
                   'Foot': ['foot']}
 
-@st.cache
+@st.cache_data
 def fetch_data(config):
     dataset_handler = DataSet(config, load_dataset=True)
     kihadataset_train, kihadataset_test = dataset_handler.run_dataset_split_loop()
@@ -40,9 +41,8 @@ def fetch_data(config):
     test_dataloader = DataLoader(dataset=test_dataset, batch_size=config['batch_size'], shuffle=False)
     return test_dataloader, kihadataset_test
 
-# @st.cache()
+# @st.cache_data
 def fetch_model(sensor_name, model_name):
-    device = torch.device('cpu')
     model_names = {'CNNLSTM':'hernandez2021cnnlstm', 'BiLSTM':'bilstm', 'BioMAT': 'transformertsai'}
     sensor_names = {'Thigh & Shank & Foot':'thighshankfoot',
                     'Thigh & Shank':'thighshank',
@@ -56,10 +56,10 @@ def fetch_model(sensor_name, model_name):
     else:
         model_file = sensor_names[sensor_name] + '_' + model_names[model_name]+'_g1g2rardsasd_g1g2rardsasd.pt'
     # st.write(model_file)
-    model = torch.load(os.path.join('./caches/trained_model/', model_file))
+    model = load_trained_model(os.path.join('./caches/trained_model/', model_file))
     return model
 
-# @st.cache
+# @st.cache_data
 def fetch_predictions(model):
     test_handler = Test()
     y_pred, y_true, loss = test_handler.run_testing(config, model, test_dataloader=test_dataloader)
@@ -109,8 +109,6 @@ if st.sidebar.button('Predict'):
     fig = plot_kinematic_predictions(y_true, y_pred, kihadataset_test['labels'], subject,
                                  selected_activities=selected_activities, selected_index_to_plot=index_to_plot)
     st.plotly_chart(fig, use_container_width=True)
-
-
 
 
 

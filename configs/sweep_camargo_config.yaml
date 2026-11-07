@@ -1,7 +1,7 @@
 {
   "dataset_name": "camargo",
-  "dataset_path": "J:/CAMARGO_ET_AL_J_BIOMECH_DATASET/",
-  "dl_dataset_path": "J:/CAMARGO_ET_AL_J_BIOMECH_DATASET/MiniDataset/",
+  "dataset_path": "C:\\Users\\Judyc\\VSProjects\\BioMAT\\data\\MiniDataset\\BioMAT_Dataset.p",
+  "dl_dataset_path": "C:\\Users\\Judyc\\VSProjects\\BioMAT\\data\\MiniDataset\\BioMAT_Dataset.p",
   "dl_dataset": "levelgroundrampstair_imuik_AB06AB07AB08AB09AB10AB11AB12AB13AB14AB15AB16AB17AB18AB19AB20AB21AB23AB24AB25.p",
   "selected_data_types": ["baseline"],
   "selected_data_status": ["imu"],

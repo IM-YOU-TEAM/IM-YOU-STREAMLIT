@@ -11,6 +11,7 @@ from parametertuning import ParameterTuning
 from train import Train
 from test import Test
 from evaluation import Evaluation
+from utils.pytorchtools import load_trained_model
 from utils.update_config import update_config
 from utils.utils import get_activity_index_test, get_model_name_from_activites
 from visualization.wandb_plot import wandb_plot_true_pred, wandb_plotly_true_pred
@@ -87,7 +88,9 @@ def run_main():
                          '_' + "".join(config['model_train_activity']) + \
                          '_' + "".join(config['model_test_activity']) + '.pt'
             if load_model and os.path.isfile('./caches/trained_model/'+model_file):
-                model = torch.load(os.path.join('./caches/trained_model/', model_file))
+                model = load_trained_model(
+                    os.path.join('./caches/trained_model/', model_file)
+                )
             else:
                 training_handler = Train(config, train_dataloader=train_dataloader, test_dataloader=test_dataloader)
                 model = training_handler.run_training()

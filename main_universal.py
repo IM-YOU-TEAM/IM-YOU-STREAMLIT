@@ -11,6 +11,7 @@ from evaluation import Evaluation
 from parametertuning import ParameterTuning
 from test import Test
 from train import Train
+from utils.pytorchtools import load_trained_model
 from utils.utils import get_activity_index_test, get_model_name_from_activites
 from visualization.wandb_plot import wandb_plotly_true_pred
 
@@ -54,7 +55,9 @@ def run_main():
             model_file = config['model_name'] + '_' + "".join(config['model_train_activity']) + \
                          '_' + "".join(config['model_test_activity']) + '.pt'
             if load_model and os.path.isfile('./caches/trained_model/' + model_file):
-                model = torch.load(os.path.join('./caches/trained_model/', model_file))
+                model = load_trained_model(
+                    os.path.join('./caches/trained_model/', model_file)
+                )
             else:
                 model = LinearRegression().fit(x_tr, y_tr)
                 if save_model:

@@ -1,5 +1,22 @@
 import numpy as np
 import torch
+from torch import nn
+
+
+def load_trained_model(path):
+    """Load a full pickled model with CPU + legacy-PyTorch compatibility."""
+    model = torch.load(
+        path,
+        map_location=torch.device('cpu'),
+        weights_only=False,
+    )
+    # Older nn.GELU checkpoints lack `approximate` (added in newer PyTorch).
+    for module in model.modules():
+        if isinstance(module, nn.GELU) and not hasattr(module, 'approximate'):
+            module.approximate = 'none'
+    return model
+
+
 # https://github.com/Bjarten/early-stopping-pytorch/blob/master/MNIST_Early_Stopping_example.ipynb
 class EarlyStopping:
     """Early stops the training if validation loss doesn't improve after a given patience."""

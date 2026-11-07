@@ -1,5 +1,6 @@
 import os
-import pickle
+
+import pandas as pd
 
 
 class LoadPickleDataSet:
@@ -20,8 +21,10 @@ class LoadPickleDataSet:
         dataset_file = self.dl_dataset_path + self.dataset_name
         if os.path.isfile(dataset_file):
             print('file exist')
-            with open(dataset_file, 'rb') as f:
-                self.dataset = pickle.load(f)
+            # Use pandas' pickle loader for compatibility with DataFrames
+            # pickled under older pandas versions (raw pickle.load fails on
+            # BlockPlacement mismatches with pandas 2+/3+).
+            self.dataset = pd.read_pickle(dataset_file)
         else:
             print('this dataset is not exist: run run_dataset_prepration.py first')
 

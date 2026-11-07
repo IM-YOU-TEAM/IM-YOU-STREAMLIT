@@ -1,0 +1,16 @@
+torch
+torchvision
+pyyaml
+scipy
+streamlit
+
+
+numpy
+pandas
+scikit-learn
+plotly
+transforms3d
+matplotlib
+wandb
+fastai
+tsai

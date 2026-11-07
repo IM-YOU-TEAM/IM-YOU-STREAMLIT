@@ -2,9 +2,9 @@ import pandas as pd
 import os
 import numpy as np
 from utils import filter
-from config import get_config
+from config import get_config_universal
 
-config = get_config()
+config = get_config_universal('camargo')
 
 def read_csv(filename):
     df = pd.read_csv(filename)
@@ -200,6 +200,5 @@ def readMotionFile(filename):
 #     data = data[1:]
 #
 #     return labels, data
-
 
 

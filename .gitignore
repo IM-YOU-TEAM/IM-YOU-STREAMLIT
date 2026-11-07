@@ -6,3 +6,5 @@ model/__pycache__
 caches
 runs
 wandb
+data/MiniDataset/
+.venv/
