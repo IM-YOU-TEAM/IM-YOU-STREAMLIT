@@ -1,0 +1,2 @@
+version,device name,recording epoch time,recording time,recording timezone,platform,appVersion,device id,sensors,sampleRateMs,standardisation,platform version
+3,iPhone 17 Pro Max,1794107533255,2026-11-08_03-12-13,America/Edmonton,ios,1.68.1,354ea7e3-42fc-48c4-866e-f7bdb050a4a9,Accelerometer|Gravity|Gyroscope|Orientation|Annotation|GyroscopeUncalibrated|AccelerometerUncalibrated,10|10|10|10||10|10,false,27.2

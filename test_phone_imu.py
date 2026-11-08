@@ -79,9 +79,18 @@ def detect_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
             cols,
             ["Acceleration z (m/s^2)", "Acceleration z (m/s²)", "Acceleration z", "Linear Acceleration z", "az", "accz"],
         ),
-        "gyro_x": _find_column(cols, ["Gyroscope x (rad/s)", "Gyroscope x (deg/s)", "Gyroscope x", "wx", "gx"]),
-        "gyro_y": _find_column(cols, ["Gyroscope y (rad/s)", "Gyroscope y (deg/s)", "Gyroscope y", "wy", "gy"]),
-        "gyro_z": _find_column(cols, ["Gyroscope z (rad/s)", "Gyroscope z (deg/s)", "Gyroscope z", "wz", "gz"]),
+        "gyro_x": _find_column(
+            cols,
+            ["Gyroscope x (rad/s)", "Gyroscope x (deg/s)", "Gyroscope x", "gx_alpha", "gyrox", "wx", "gx"],
+        ),
+        "gyro_y": _find_column(
+            cols,
+            ["Gyroscope y (rad/s)", "Gyroscope y (deg/s)", "Gyroscope y", "gy_beta", "gyroy", "wy", "gy"],
+        ),
+        "gyro_z": _find_column(
+            cols,
+            ["Gyroscope z (rad/s)", "Gyroscope z (deg/s)", "Gyroscope z", "gz_gamma", "gyroz", "wz", "gz"],
+        ),
     }
 
 

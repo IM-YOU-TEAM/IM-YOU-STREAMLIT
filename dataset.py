@@ -141,8 +141,8 @@ class DataSet:
                         updated_x.append(xx_temp)
                         update_y.append(yy_temp)
                         updated_label.append(l_temp)
-                    if len(xx_temp)==0:
-                        print(i)
+                    # if len(xx_temp)==0:
+                        # print(i)
             elif self.config['dataset_name']=='camargo':
                 l_temp = ll[(ll['trialType'].isin(self.selected_trial_type)) & (ll['Label'].isin(self.selected_activity_label))]
                 l_temp_index = l_temp.index.values

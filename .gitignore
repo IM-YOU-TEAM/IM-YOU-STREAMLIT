@@ -8,3 +8,5 @@ runs
 wandb
 data/MiniDataset/
 .venv/
+# Too large for GitHub (>100MB); keep locally only
+biomat_shank_thigh_100hz.zip

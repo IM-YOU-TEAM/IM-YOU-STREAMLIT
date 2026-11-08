@@ -1,0 +1,17 @@
+{
+  "classifier.py": "b7bdfe88287dd437b44afc8fb3ec8f34a0482db4d56c6e5f0060ed87c6adb451",
+  "classifier_model.pt": "46e6d0023d3f0013816f3f3571e2659ac8852689a7d23f76a75083404c26a0ab",
+  "model.pt": "ca1294233117147a5da142ed6d5fa212f1e6cf3ae48a96bb5d6137db7d89ade2",
+  "model.py": "e74a9bc2442ba0e642e0a2c7756a5348facc57d8a3db188d4f457d003fb507d6",
+  "predict.py": "9449e916d9f8795510524112c76fb57ce926456774ba1cbb97bbe043d1c29d3d",
+  "preprocessing.py": "3eb8d55704041ea00866edec4855724efeaf0b56c37a42f5e1d6d225c0d9f0bb",
+  "provenance.json": "dc3588ed2838600a64de23b9f39813d81daf36504eee9f15a3a4ee5126cc98e9",
+  "README.md": "ed760559581e95f4338d4c549fa5c270009cebd7c5ceabaa26b700a725eb51fd",
+  "requirements.txt": "de627e7317d083d1230c3b19ddf2baa99e86a01df9a8981960e07dda7188463c",
+  "training_protocol.json": "fa69b3b0ece0c34c65654f0642df4bfda52c1b6cf39ff337652cbbe8e06bfb22",
+  "training_results.json": "68ddb9d077f154aa559a4fb46958cbb312165ad572965e5dcff42eaf82e2d22a",
+  "training_results.md": "4f3744d6acd98d709d23b8df932b16f3fe9802121ffc0653178f7a7771f34b23",
+  "two_sensor_100hz_results.png": "1812152a9e2a6673adeb674da49c21e4526b016b5dda841e943fdb628526c0fe",
+  "verification_examples.npz": "8c57f7d04b972c1b887349b8e5fcb235d30db6014d744da76416c1cfee463971",
+  "verification_report.json": "bdc99413e2b51716ec103bbacbf4a298e2a80d05917fa33cbdd23031c9dee544"
+}

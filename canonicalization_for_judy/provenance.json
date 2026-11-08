@@ -1,0 +1,21 @@
+{
+  "experiment": "canonical100_v1",
+  "sample_rate_hz": 100,
+  "input_shape": [
+    "batch",
+    250,
+    12
+  ],
+  "sites": [
+    "shank",
+    "thigh"
+  ],
+  "regressor_epoch": 12,
+  "classifier_epoch": 30,
+  "phone_validation_performed": false,
+  "example_source": "15 already-canonicalized Camargo test windows: one per activity per test participant.",
+  "source_checkpoints": {
+    "model.pt": "ca1294233117147a5da142ed6d5fa212f1e6cf3ae48a96bb5d6137db7d89ade2",
+    "classifier_model.pt": "46e6d0023d3f0013816f3f3571e2659ac8852689a7d23f76a75083404c26a0ab"
+  }
+}

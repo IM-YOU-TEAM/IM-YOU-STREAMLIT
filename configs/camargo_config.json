@@ -1,7 +1,7 @@
 {
   "dataset_name": "camargo",
-  "dataset_path": "C:\\Users\\Judyc\\VSProjects\\BioMAT\\data\\MiniDataset\\BioMAT_Dataset.p",
-  "dl_dataset_path": "C:\\Users\\Judyc\\VSProjects\\BioMAT\\data\\MiniDataset\\",
+  "dataset_path": "C:\\Testing Model\\biomat\\data\\MiniDataset\\BioMAT_Dataset.p",
+  "dl_dataset_path": "C:\\Testing Model\\biomat\\data\\MiniDataset\\",
   "dl_dataset": "BioMAT_Dataset.p",
   "selected_data_types": ["baseline"],
   "selected_data_status": ["imu"],
