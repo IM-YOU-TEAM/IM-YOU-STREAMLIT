@@ -1,7 +1,8 @@
-"""Align OpenSim motion-capture angles to phone IMU time via stillness → motion onset.
+"""Align OpenSim motion-capture angles to model prediction time via hip peaks.
 
-Phone and OpenSim clocks are independent. For trials that begin with quiet standing
-then walking, detect each stream's motion onset and shift OpenSim so the onsets coincide.
+Phone and OpenSim clocks are independent. Two strategies:
+  - match hip flexion peaks
+  - coarse stillness→walk onset, then refine with hip flexion peaks
 """
 from __future__ import annotations
 
@@ -10,8 +11,10 @@ from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from scipy.signal import find_peaks
 
 OPENSIM_JOINT_COLS = ("hip_flexion_r", "knee_angle_r", "ankle_angle_r")
+JOINT_INDEX = {"hip": 0, "knee": 1, "ankle": 2}
 
 
 def parse_opensim_motion(file_bytes: bytes, joint_cols: Sequence[str] = OPENSIM_JOINT_COLS) -> Tuple[pd.DataFrame, dict]:
@@ -68,7 +71,7 @@ def _smooth(signal: np.ndarray, fs: float, window_s: float = 0.05) -> np.ndarray
     return np.convolve(signal, w, mode="same")
 
 
-def detect_onset_from_activity(
+def _detect_onset_from_activity(
     activity: np.ndarray,
     fs: float,
     *,
@@ -76,11 +79,7 @@ def detect_onset_from_activity(
     k_std: float = 5.0,
     min_above_s: float = 0.15,
 ) -> float:
-    """Return onset time (seconds from activity[0]) when activity leaves initial stillness.
-
-    Uses the first quiet window as baseline. Onset is the first sample after that window
-    where activity stays above mean + k_std*std for at least `min_above_s`.
-    """
+    """Onset time (s from activity[0]) when activity leaves initial stillness."""
     activity = np.asarray(activity, dtype=float)
     n = len(activity)
     if n < 5:
@@ -99,148 +98,156 @@ def detect_onset_from_activity(
         if run >= min_run:
             return (n_quiet + i - min_run + 1) / fs
 
-    # Fallback: strongest rise after the quiet window.
     d = np.abs(np.diff(activity, prepend=activity[0]))
     d[:n_quiet] = 0.0
     return int(np.argmax(d)) / fs
 
 
-def imu_activity_from_gyro(imu: np.ndarray, fs: float) -> np.ndarray:
-    """Scalar activity proxy for phone IMU: smoothed gyro magnitude."""
+def _imu_onset(imu: np.ndarray, fs: float = 100.0) -> float:
     imu = np.asarray(imu, dtype=float)
     if imu.ndim != 2 or imu.shape[1] < 6:
         raise ValueError(f"Expected IMU [N,6+], got {imu.shape}")
-    gyro_mag = np.linalg.norm(imu[:, 3:6], axis=1)
-    return _smooth(gyro_mag, fs=fs, window_s=0.08)
+    gyro_mag = _smooth(np.linalg.norm(imu[:, 3:6], axis=1), fs=fs, window_s=0.08)
+    return _detect_onset_from_activity(gyro_mag, fs=fs)
 
 
-def opensim_activity_from_joints(
-    time_s: np.ndarray,
-    angles_deg: np.ndarray,
-) -> Tuple[np.ndarray, float]:
-    """Scalar activity proxy for OpenSim: smoothed joint angular-speed magnitude.
-
-    Returns (activity_on_sample_grid, nominal_fs).
-    """
+def _opensim_onset(time_s: np.ndarray, angles_deg: np.ndarray) -> float:
     time_s = np.asarray(time_s, dtype=float)
     angles_deg = np.asarray(angles_deg, dtype=float)
-    if len(time_s) != len(angles_deg):
-        raise ValueError("OpenSim time/angle length mismatch")
     if len(time_s) < 3:
-        return np.zeros(len(time_s)), 60.0
-
+        return float(time_s[0]) if len(time_s) else 0.0
     dt = np.diff(time_s)
     dt = dt[dt > 0]
     fs = 1.0 / float(np.median(dt)) if len(dt) else 60.0
-    # Gradient w.r.t. time for each joint, then magnitude.
-    dadt = np.gradient(angles_deg, time_s, axis=0)
-    speed = np.linalg.norm(dadt, axis=1)
-    return _smooth(speed, fs=fs, window_s=0.08), fs
+    speed = np.linalg.norm(np.gradient(angles_deg, time_s, axis=0), axis=1)
+    speed = _smooth(speed, fs=fs, window_s=0.08)
+    return float(time_s[0] + _detect_onset_from_activity(speed, fs=fs))
 
 
-def detect_imu_onset(imu: np.ndarray, fs: float = 100.0, **kwargs) -> float:
-    activity = imu_activity_from_gyro(imu, fs=fs)
-    return detect_onset_from_activity(activity, fs=fs, **kwargs)
-
-
-def detect_opensim_onset(time_s: np.ndarray, angles_deg: np.ndarray, **kwargs) -> float:
-    """Onset in the OpenSim file's own time axis (not shifted)."""
-    activity, fs = opensim_activity_from_joints(time_s, angles_deg)
-    rel = detect_onset_from_activity(activity, fs=fs, **kwargs)
-    return float(time_s[0] + rel)
-
-
-def match_onsets(
+def _coarse_onset_shift(
     opensim_time_s: np.ndarray,
     opensim_angles_deg: np.ndarray,
     imu: np.ndarray,
-    *,
-    imu_fs: float = 100.0,
-    manual_offset_s: Optional[float] = None,
-    refine_with_knee_xcorr: bool = False,
-    pred_time_s: Optional[np.ndarray] = None,
-    pred_angles_deg: Optional[np.ndarray] = None,
+    imu_fs: float,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
-    """Shift OpenSim times onto the IMU/model relative clock (0 = IMU series start).
+    """Shift OpenSim so stillness→walk onset matches IMU gyro onset."""
+    imu_onset = _imu_onset(imu, fs=imu_fs)
+    osim_onset = _opensim_onset(opensim_time_s, opensim_angles_deg)
+    offset = -osim_onset + imu_onset
+    return opensim_time_s + offset, {
+        "imu_onset_s": float(imu_onset),
+        "opensim_onset_s": float(osim_onset),
+        "coarse_offset_s": float(offset),
+    }
 
-    If `manual_offset_s` is set, uses `opensim_time + manual_offset_s`.
-    Otherwise aligns OpenSim onset to IMU onset:
-        t_plot = opensim_time - opensim_onset + imu_onset
 
-    Optional knee cross-correlation fine-tunes the shift using predictions.
+def _uniform_series(time_s: np.ndarray, values: np.ndarray, fs: float) -> Tuple[np.ndarray, np.ndarray]:
+    time_s = np.asarray(time_s, dtype=float)
+    values = np.asarray(values, dtype=float)
+    if len(time_s) < 2:
+        return time_s, values
+    t0, t1 = float(time_s[0]), float(time_s[-1])
+    grid = np.arange(t0, t1 + 0.5 / fs, 1.0 / fs)
+    return grid, np.interp(grid, time_s, values)
+
+
+def find_joint_peak_times(
+    time_s: np.ndarray,
+    angle_deg: np.ndarray,
+    *,
+    fs: float = 100.0,
+    min_period_s: float = 0.45,
+    prominence_frac: float = 0.12,
+    use_valleys: bool = False,
+) -> np.ndarray:
+    """Times (s) of prominent peaks (or valleys) in a joint-angle series."""
+    t_u, y_u = _uniform_series(time_s, angle_deg, fs=fs)
+    if len(y_u) < 5:
+        return np.asarray([], dtype=float)
+
+    y = -y_u if use_valleys else y_u
+    y_range = float(np.ptp(y))
+    prominence = max(prominence_frac * y_range, 1.0) if y_range > 0 else 1.0
+    distance = max(int(round(min_period_s * fs)), 1)
+    peaks, _props = find_peaks(y, distance=distance, prominence=prominence)
+    if len(peaks) == 0:
+        peaks, _props = find_peaks(y, distance=distance, prominence=max(prominence * 0.5, 0.5))
+    return t_u[peaks]
+
+
+def _median_peak_offset(pred_peaks: np.ndarray, osim_peaks: np.ndarray) -> Optional[float]:
+    """Offset to add to OpenSim times so its peaks line up with prediction peaks."""
+    if len(pred_peaks) == 0 or len(osim_peaks) == 0:
+        return None
+    n = min(len(pred_peaks), len(osim_peaks))
+    return float(np.median(pred_peaks[:n] - osim_peaks[:n]))
+
+
+def match_joint_peaks(
+    opensim_time_s: np.ndarray,
+    opensim_angles_deg: np.ndarray,
+    pred_time_s: np.ndarray,
+    pred_angles_deg: np.ndarray,
+    *,
+    joint: str = "hip",
+    fs: float = 100.0,
+    coarse_onset_imu: Optional[np.ndarray] = None,
+    imu_fs: float = 100.0,
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    """Shift OpenSim times so joint-angle peaks align with model prediction peaks.
+
+    Default joint is hip flexion. If `coarse_onset_imu` is provided, first aligns
+    stillness→walk onsets, then refines with peak matching.
+
+    Returns (opensim_time_on_pred_axis, info).
     """
     opensim_time_s = np.asarray(opensim_time_s, dtype=float)
     opensim_angles_deg = np.asarray(opensim_angles_deg, dtype=float)
-    info: Dict[str, float] = {}
+    pred_time_s = np.asarray(pred_time_s, dtype=float)
+    pred_angles_deg = np.asarray(pred_angles_deg, dtype=float)
 
-    if manual_offset_s is not None:
-        t_plot = opensim_time_s + float(manual_offset_s)
-        info["offset_s"] = float(manual_offset_s)
-        info["method_code"] = 0.0
-        return t_plot, info
+    if joint not in JOINT_INDEX:
+        raise ValueError(f"joint must be one of {list(JOINT_INDEX)}, got {joint!r}")
+    j = JOINT_INDEX[joint]
+    if opensim_angles_deg.ndim != 2 or opensim_angles_deg.shape[1] <= j:
+        raise ValueError("opensim_angles_deg must be [N, >=joint]")
+    if pred_angles_deg.ndim != 2 or pred_angles_deg.shape[1] <= j:
+        raise ValueError("pred_angles_deg must be [N, >=joint]")
 
-    imu_onset = detect_imu_onset(imu, fs=imu_fs)
-    osim_onset = detect_opensim_onset(opensim_time_s, opensim_angles_deg)
-    offset = -osim_onset + imu_onset
-    t_plot = opensim_time_s + offset
-    info.update(
-        {
-            "imu_onset_s": float(imu_onset),
-            "opensim_onset_s": float(osim_onset),
-            "offset_s": float(offset),
-            "method_code": 1.0,
-        }
-    )
+    info: Dict[str, float] = {"joint_index": float(j)}
+    t_plot = opensim_time_s.copy()
 
-    if (
-        refine_with_knee_xcorr
-        and pred_time_s is not None
-        and pred_angles_deg is not None
-        and len(pred_time_s) > 20
-        and opensim_angles_deg.shape[1] >= 2
-    ):
-        fine = _knee_xcorr_shift(
-            pred_time_s,
-            pred_angles_deg[:, 1],
-            t_plot,
-            opensim_angles_deg[:, 1],
-            fs=imu_fs,
+    if coarse_onset_imu is not None:
+        t_plot, coarse = _coarse_onset_shift(
+            opensim_time_s, opensim_angles_deg, coarse_onset_imu, imu_fs=imu_fs
         )
-        t_plot = t_plot + fine
-        info["xcorr_shift_s"] = float(fine)
-        info["offset_s"] = float(info["offset_s"] + fine)
-        info["method_code"] = 2.0
+        info.update(coarse)
+        info["offset_s"] = float(coarse["coarse_offset_s"])
+    else:
+        info["offset_s"] = 0.0
 
+    pred_peaks = find_joint_peak_times(pred_time_s, pred_angles_deg[:, j], fs=fs)
+    osim_peaks = find_joint_peak_times(t_plot, opensim_angles_deg[:, j], fs=fs)
+
+    if len(pred_peaks) >= 2 and len(osim_peaks) < max(len(pred_peaks) // 2, 1):
+        osim_alt = find_joint_peak_times(t_plot, opensim_angles_deg[:, j], fs=fs, use_valleys=True)
+        if len(osim_alt) > len(osim_peaks):
+            osim_peaks = osim_alt
+            info["used_valleys"] = 1.0
+
+    peak_offset = _median_peak_offset(pred_peaks, osim_peaks)
+    if peak_offset is None:
+        pred_y = pred_angles_deg[:, j]
+        osim_y = np.interp(pred_time_s, t_plot, opensim_angles_deg[:, j], left=np.nan, right=np.nan)
+        if np.isfinite(osim_y).sum() > 10:
+            peak_offset = float(pred_time_s[int(np.nanargmax(pred_y))] - pred_time_s[int(np.nanargmax(osim_y))])
+        else:
+            peak_offset = 0.0
+        info["peak_fallback"] = 1.0
+
+    t_plot = t_plot + float(peak_offset)
+    info["peak_offset_s"] = float(peak_offset)
+    info["offset_s"] = float(info.get("offset_s", 0.0) + peak_offset)
+    info["n_pred_peaks"] = float(len(pred_peaks))
+    info["n_opensim_peaks"] = float(len(osim_peaks))
     return t_plot, info
-
-
-def _knee_xcorr_shift(
-    pred_t: np.ndarray,
-    pred_knee: np.ndarray,
-    osim_t: np.ndarray,
-    osim_knee: np.ndarray,
-    fs: float,
-    max_lag_s: float = 1.0,
-) -> float:
-    pred_t = np.asarray(pred_t, dtype=float)
-    osim_t = np.asarray(osim_t, dtype=float)
-    t0 = max(pred_t[0], osim_t[0])
-    t1 = min(pred_t[-1], osim_t[-1])
-    if t1 <= t0 + 0.5:
-        return 0.0
-
-    grid = np.arange(t0, t1, 1.0 / fs)
-    if len(grid) < 20:
-        return 0.0
-    a = np.interp(grid, pred_t, pred_knee)
-    b = np.interp(grid, osim_t, osim_knee)
-    a = a - np.mean(a)
-    b = b - np.mean(b)
-    corr = np.correlate(a, b, mode="full")
-    lags = np.arange(-len(b) + 1, len(a))
-    max_lag = int(round(max_lag_s * fs))
-    mask = np.abs(lags) <= max_lag
-    if not np.any(mask):
-        return 0.0
-    best = int(lags[mask][int(np.argmax(corr[mask]))])
-    return best / fs

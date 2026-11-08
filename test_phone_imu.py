@@ -8,7 +8,7 @@ Requires four IMU files:
   - RIGHT THIGH gyroscope
 
 Optional OpenSim motion CSV/MOT (hip_flexion_r, knee_angle_r, ankle_angle_r) is
-aligned to the phone timeline via preprocessing.onset_align (stillness→walk onset).
+aligned to predictions via hip-peak matching in preprocessing.onset_align.
 
 Accel and gyro for each site are merged on `seconds_elapsed`, then shank/thigh
 are aligned to a shared 100 Hz timeline. Uses the same canonical100_v1 contract
@@ -43,7 +43,7 @@ from preprocessing.canonicalize import (
 )
 from preprocessing.onset_align import (
     OPENSIM_JOINT_COLS,
-    match_onsets,
+    match_joint_peaks,
     parse_opensim_motion,
 )
 from test import Test
@@ -53,7 +53,18 @@ from utils.pytorchtools import load_trained_model, peek_checkpoint_meta
 TARGET_FS = 100.0
 OVERLAP = 0.5
 JOINT_NAMES = ["Hip flexion", "Knee", "Ankle"]
+KNEE_IDX = 1
 FEATURES_PER_SENSOR = 6
+
+
+def negate_pred_knee(angles: np.ndarray) -> np.ndarray:
+    """Negate predicted knee only (Camargo vs OpenSim sign); hip/ankle unchanged."""
+    out = np.asarray(angles, dtype=float).copy()
+    if out.ndim >= 2 and out.shape[-1] > KNEE_IDX:
+        out[..., KNEE_IDX] = -out[..., KNEE_IDX]
+    return out
+
+
 MODEL_PATH = os.path.join(
     ".",
     "caches",
@@ -62,10 +73,8 @@ MODEL_PATH = os.path.join(
 )
 
 ALIGN_CHOICES = {
-    "match_onsets": "Match stillness→walk onsets (IMU gyro + OpenSim joints)",
-    "match_onsets_xcorr": "Match onsets + knee cross-correlation fine-tune",
-    "manual": "Manual OpenSim time offset",
-    "start_together": "Start together (OpenSim t=0 at IMU t=0)",
+    "match_peaks_hip": "Match hip flexion peaks",
+    "match_peaks_hip_onset": "Onset coarse align + match hip flexion peaks",
 }
 
 
@@ -289,14 +298,14 @@ def plot_predictions(
     true_t: Optional[np.ndarray] = None,
     true_y: Optional[np.ndarray] = None,
 ) -> go.Figure:
-    pred = y_pred[window_index]
+    pred = negate_pred_knee(y_pred[window_index])
     t = np.arange(pred.shape[0]) / TARGET_FS
-    fig = make_subplots(rows=1, cols=3, subplot_titles=JOINT_NAMES)
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, subplot_titles=JOINT_NAMES)
     for j, name in enumerate(JOINT_NAMES):
         fig.add_trace(
             go.Scatter(x=t, y=pred[:, j], mode="lines", name=f"Pred {name}", showlegend=(j == 0)),
-            row=1,
-            col=j + 1,
+            row=j + 1,
+            col=1,
         )
         if true_t is not None and true_y is not None:
             fig.add_trace(
@@ -308,14 +317,14 @@ def plot_predictions(
                     line=dict(dash="dash"),
                     showlegend=(j == 0),
                 ),
-                row=1,
-                col=j + 1,
+                row=j + 1,
+                col=1,
             )
-        fig.update_yaxes(title_text="Angle (deg)", row=1, col=j + 1)
-        fig.update_xaxes(title_text="Time (s)", row=1, col=j + 1)
+        fig.update_yaxes(title_text="Angle (deg)", row=j + 1, col=1)
+    fig.update_xaxes(title_text="Time (s)", row=3, col=1)
     fig.update_layout(
         title=f"Level-ground walking kinematics — window {window_index}",
-        height=420,
+        height=900,
         margin=dict(l=40, r=20, t=60, b=40),
     )
     return fig
@@ -326,14 +335,14 @@ def plot_stitched(
     true_t: Optional[np.ndarray] = None,
     true_y: Optional[np.ndarray] = None,
 ) -> go.Figure:
-    stitched = stitch_windows(y_pred)
+    stitched = negate_pred_knee(stitch_windows(y_pred))
     t = np.arange(stitched.shape[0]) / TARGET_FS
-    fig = make_subplots(rows=1, cols=3, subplot_titles=JOINT_NAMES)
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, subplot_titles=JOINT_NAMES)
     for j, name in enumerate(JOINT_NAMES):
         fig.add_trace(
             go.Scatter(x=t, y=stitched[:, j], mode="lines", name=f"Pred {name}", showlegend=(j == 0)),
-            row=1,
-            col=j + 1,
+            row=j + 1,
+            col=1,
         )
         if true_t is not None and true_y is not None:
             fig.add_trace(
@@ -345,14 +354,14 @@ def plot_stitched(
                     line=dict(dash="dash"),
                     showlegend=(j == 0),
                 ),
-                row=1,
-                col=j + 1,
+                row=j + 1,
+                col=1,
             )
-        fig.update_yaxes(title_text="Angle (deg)", row=1, col=j + 1)
-        fig.update_xaxes(title_text="Time (s)", row=1, col=j + 1)
+        fig.update_yaxes(title_text="Angle (deg)", row=j + 1, col=1)
+    fig.update_xaxes(title_text="Time (s)", row=3, col=1)
     fig.update_layout(
         title="Stitched level-ground walking kinematics (pred vs OpenSim)",
-        height=420,
+        height=900,
         margin=dict(l=40, r=20, t=60, b=40),
     )
     return fig
@@ -452,17 +461,10 @@ def main():
             help="Coordinates export with endheader; needs hip_flexion_r, knee_angle_r, ankle_angle_r.",
         )
         align_method = st.selectbox(
-            "Align OpenSim to phone IMU",
+            "Align OpenSim to predictions",
             list(ALIGN_CHOICES.keys()),
             format_func=lambda k: ALIGN_CHOICES[k],
             index=0,
-        )
-        manual_offset_s = st.number_input(
-            "Manual OpenSim offset (s)",
-            value=0.0,
-            step=0.01,
-            help="Used when alignment mode is Manual: t_plot = opensim_time + offset.",
-            disabled=(align_method != "manual"),
         )
         st.markdown("**Activity:** Level ground walking")
         st.caption("Expected units: acceleration m/s², gyroscope rad/s (no conversion applied).")
@@ -588,36 +590,22 @@ def main():
             opensim_df, opensim_meta = parse_opensim_motion(uploaded_opensim.getvalue())
             stitched_for_align = stitch_windows(y_pred)
             pred_t = np.arange(len(stitched_for_align)) / TARGET_FS
-            # Mean of shank+thigh IMU on the model-relative timeline (t=0 at series start).
             imu_for_onset = 0.5 * (aligned["shank"] + aligned["thigh"])
+            osim_t = opensim_df["time"].to_numpy(dtype=float)
+            true_y = opensim_df[list(OPENSIM_JOINT_COLS)].to_numpy(dtype=float)
 
-            if align_method == "start_together":
-                true_t = opensim_df["time"].to_numpy(dtype=float) - float(opensim_df["time"].iloc[0])
-                true_y = opensim_df[list(OPENSIM_JOINT_COLS)].to_numpy(dtype=float)
-                align_info = {"method": "start_together", "offset_s": float(-opensim_df["time"].iloc[0])}
-            elif align_method == "manual":
-                true_t, align_info = match_onsets(
-                    opensim_df["time"].to_numpy(dtype=float),
-                    opensim_df[list(OPENSIM_JOINT_COLS)].to_numpy(dtype=float),
-                    imu_for_onset,
-                    imu_fs=TARGET_FS,
-                    manual_offset_s=float(manual_offset_s),
-                )
-                true_y = opensim_df[list(OPENSIM_JOINT_COLS)].to_numpy(dtype=float)
-                align_info["method"] = "manual"
-            else:
-                true_t, align_info = match_onsets(
-                    opensim_df["time"].to_numpy(dtype=float),
-                    opensim_df[list(OPENSIM_JOINT_COLS)].to_numpy(dtype=float),
-                    imu_for_onset,
-                    imu_fs=TARGET_FS,
-                    refine_with_knee_xcorr=(align_method == "match_onsets_xcorr"),
-                    pred_time_s=pred_t,
-                    pred_angles_deg=stitched_for_align,
-                )
-                true_y = opensim_df[list(OPENSIM_JOINT_COLS)].to_numpy(dtype=float)
-                align_info["method"] = align_method
-                align_info["inDegrees"] = bool(opensim_meta.get("inDegrees", True))
+            true_t, align_info = match_joint_peaks(
+                osim_t,
+                true_y,
+                pred_t,
+                stitched_for_align,
+                joint="hip",
+                fs=TARGET_FS,
+                coarse_onset_imu=(imu_for_onset if align_method == "match_peaks_hip_onset" else None),
+                imu_fs=TARGET_FS,
+            )
+            align_info["method"] = align_method
+            align_info["inDegrees"] = float(1.0 if opensim_meta.get("inDegrees", True) else 0.0)
 
             st.info(
                 "OpenSim alignment: "
@@ -642,7 +630,7 @@ def main():
         )
 
     out_df = pd.DataFrame(
-        stitch_windows(y_pred),
+        negate_pred_knee(stitch_windows(y_pred)),
         columns=["hip_flexion_r_deg", "knee_angle_r_deg", "ankle_angle_r_deg"],
     )
     out_df.insert(0, "time_s", np.arange(len(out_df)) / TARGET_FS)
