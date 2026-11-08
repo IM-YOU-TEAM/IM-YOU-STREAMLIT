@@ -65,6 +65,75 @@ def negate_pred_knee(angles: np.ndarray) -> np.ndarray:
     return out
 
 
+def compute_angle_errors(
+    pred_t: np.ndarray,
+    pred_y: np.ndarray,
+    true_t: np.ndarray,
+    true_y: np.ndarray,
+    t_start: float,
+    t_end: float,
+) -> pd.DataFrame:
+    """RMSE / MAE / %ROM over [t_start, t_end] after interpolating OpenSim onto pred times.
+
+    %ROM matches BioMAT Evaluation.n_rmse: 100 * RMSE / (true_max - true_min)
+    using OpenSim ground truth in the evaluation window (known range of motion).
+    """
+    pred_t = np.asarray(pred_t, dtype=float)
+    pred_y = np.asarray(pred_y, dtype=float)
+    true_t = np.asarray(true_t, dtype=float)
+    true_y = np.asarray(true_y, dtype=float)
+    if t_end <= t_start:
+        raise ValueError("Evaluation window end must be greater than start.")
+
+    mask = (pred_t >= t_start) & (pred_t <= t_end)
+    if not np.any(mask):
+        raise ValueError("No prediction samples inside the evaluation window.")
+
+    t_eval = pred_t[mask]
+    pred_eval = pred_y[mask]
+    # Only compare where OpenSim coverage exists.
+    overlap = (t_eval >= true_t.min()) & (t_eval <= true_t.max())
+    if not np.any(overlap):
+        raise ValueError("No OpenSim overlap inside the evaluation window.")
+    t_eval = t_eval[overlap]
+    pred_eval = pred_eval[overlap]
+    true_eval = np.column_stack(
+        [np.interp(t_eval, true_t, true_y[:, j]) for j in range(true_y.shape[1])]
+    )
+    err = pred_eval - true_eval
+    rows = []
+    pct_rom_vals = []
+    for j, name in enumerate(JOINT_NAMES):
+        e = err[:, j]
+        rmse = float(np.sqrt(np.mean(e ** 2)))
+        mae = float(np.mean(np.abs(e)))
+        rom = float(np.max(true_eval[:, j]) - np.min(true_eval[:, j]))
+        pct_rom = float(100.0 * rmse / rom) if rom > 0 else float("nan")
+        pct_rom_vals.append(pct_rom)
+        rows.append(
+            {
+                "joint": name,
+                "RMSE_deg": rmse,
+                "MAE_deg": mae,
+                "ROM_deg": rom,
+                "RMSE_pctROM": pct_rom,
+                "n_samples": int(len(e)),
+            }
+        )
+    e_all = err.reshape(-1)
+    rows.append(
+        {
+            "joint": "all",
+            "RMSE_deg": float(np.sqrt(np.mean(e_all ** 2))),
+            "MAE_deg": float(np.mean(np.abs(e_all))),
+            "ROM_deg": float("nan"),
+            "RMSE_pctROM": float(np.nanmean(pct_rom_vals)),
+            "n_samples": int(len(e_all)),
+        }
+    )
+    return pd.DataFrame(rows)
+
+
 MODEL_PATH = os.path.join(
     ".",
     "caches",
@@ -410,6 +479,77 @@ def _triad_mapping_ui(
     return mapping
 
 
+def _fragment(fn):
+    """Use st.fragment when available so eval-window edits don't rerun inference."""
+    decorator = getattr(st, "fragment", None)
+    return decorator(fn) if callable(decorator) else fn
+
+
+@_fragment
+def render_error_metrics(eval_pred_t: np.ndarray, eval_pred_y: np.ndarray, true_t, true_y):
+    """Isolated fragment: changing the eval window only refreshes error metrics."""
+    st.subheader("Error metrics (pred vs OpenSim)")
+    if true_t is None or true_y is None:
+        st.info("Upload an OpenSim motion file to compute RMSE / MAE / %ROM.")
+        return
+
+    t_min = float(max(eval_pred_t[0], true_t.min()))
+    t_max = float(min(eval_pred_t[-1], true_t.max()))
+    if t_max <= t_min:
+        st.warning("No overlapping time range between prediction and OpenSim after alignment.")
+        return
+
+    default_start = t_min
+    default_end = min(t_min + 3.0, t_max)
+    c1, c2 = st.columns(2)
+    with c1:
+        eval_start = st.number_input(
+            "Evaluation window start (s)",
+            min_value=float(t_min),
+            max_value=float(t_max),
+            value=float(default_start),
+            step=0.05,
+            key="eval_window_start",
+        )
+    with c2:
+        eval_end = st.number_input(
+            "Evaluation window end (s)",
+            min_value=float(t_min),
+            max_value=float(t_max),
+            value=float(max(default_end, float(eval_start) + 0.05)),
+            step=0.05,
+            key="eval_window_end",
+        )
+    try:
+        metrics_df = compute_angle_errors(
+            eval_pred_t,
+            eval_pred_y,
+            true_t,
+            true_y,
+            float(eval_start),
+            float(eval_end),
+        )
+        st.caption(
+            f"RMSE / MAE / %ROM on stitched pred vs OpenSim in [{eval_start:.2f}, {eval_end:.2f}] s "
+            f"(same knee sign convention as the plot). "
+            f"RMSE_pctROM = 100 × RMSE / OpenSim ROM in the window."
+        )
+        st.dataframe(
+            metrics_df.style.format(
+                {
+                    "RMSE_deg": "{:.2f}",
+                    "MAE_deg": "{:.2f}",
+                    "ROM_deg": "{:.2f}",
+                    "RMSE_pctROM": "{:.2f}",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    except Exception as exc:
+        st.warning(f"Could not compute metrics: {exc}")
+
+
 def main():
     st.set_page_config(page_title="BioMAT Thigh/Shank Phone IMU", layout="wide")
     st.title("BioMAT thigh/shank phone IMU")
@@ -496,82 +636,133 @@ def main():
             st.dataframe(raw_df.head(12), use_container_width=True)
         tables[key] = (raw_df, mapping)
 
-    if not st.button("Run BioMAT", type="primary"):
-        return
+    run_clicked = st.button("Run BioMAT", type="primary")
+    if run_clicked:
+        try:
+            if not os.path.isfile(MODEL_PATH):
+                raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
 
-    try:
-        if not os.path.isfile(MODEL_PATH):
-            raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
+            with st.spinner("Loading model…"):
+                model = load_model(MODEL_PATH)
+                model.eval()
 
-        with st.spinner("Loading model…"):
-            model = load_model(MODEL_PATH)
-            model.eval()
+            checkpoint_meta = merge_checkpoint_meta(model, MODEL_PATH)
+            config, checkpoint_meta = apply_model_contract(config, model, checkpoint_meta=checkpoint_meta)
+            use_canonical100 = is_canonical100_meta(checkpoint_meta)
+            selected_sensors = list(config["selected_sensors"])
+            winsize = int(config.get("target_padding_length", CANONICAL_LENGTH))
 
-        checkpoint_meta = merge_checkpoint_meta(model, MODEL_PATH)
-        config, checkpoint_meta = apply_model_contract(config, model, checkpoint_meta=checkpoint_meta)
-        use_canonical100 = is_canonical100_meta(checkpoint_meta)
-        selected_sensors = list(config["selected_sensors"])
-        winsize = int(config.get("target_padding_length", CANONICAL_LENGTH))
+            if selected_sensors != ["shank", "thigh"]:
+                raise ValueError(f"Thigh/shank model expects sites ['shank', 'thigh']; got {selected_sensors}")
+            if use_canonical100 and winsize != CANONICAL_LENGTH:
+                winsize = CANONICAL_LENGTH
 
-        if selected_sensors != ["shank", "thigh"]:
-            raise ValueError(f"Thigh/shank model expects sites ['shank', 'thigh']; got {selected_sensors}")
-        if use_canonical100 and winsize != CANONICAL_LENGTH:
-            winsize = CANONICAL_LENGTH
+            site_streams: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+            for site in ("shank", "thigh"):
+                acc_df, acc_map = tables[f"{site}_accel"]
+                gyro_df, gyro_map = tables[f"{site}_gyro"]
+                acc_t, acc = extract_triad(acc_df, acc_map)
+                gyro_t, gyro = extract_triad(gyro_df, gyro_map)
+                site_t, site_imu = merge_accel_gyro_on_seconds(acc_t, acc, gyro_t, gyro, TARGET_FS)
+                site_streams[site] = (site_t, site_imu)
 
-        st.info(
-            f"Using model contract: sensors={selected_sensors}, window={winsize}, "
-            f"preprocess={'canonical100_v1' if use_canonical100 else 'default'}"
-        )
-
-        site_streams: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
-        for site in ("shank", "thigh"):
-            acc_df, acc_map = tables[f"{site}_accel"]
-            gyro_df, gyro_map = tables[f"{site}_gyro"]
-            acc_t, acc = extract_triad(acc_df, acc_map)
-            gyro_t, gyro = extract_triad(gyro_df, gyro_map)
-            site_t, site_imu = merge_accel_gyro_on_seconds(acc_t, acc, gyro_t, gyro, TARGET_FS)
-            site_streams[site] = (site_t, site_imu)
-
-        timeline, aligned = align_dual_phone_streams(site_streams, TARGET_FS)
-        shank_windows = segment_windows(aligned["shank"], winsize, OVERLAP)
-        thigh_windows = segment_windows(aligned["thigh"], winsize, OVERLAP)
-        n_windows = min(len(shank_windows), len(thigh_windows))
-        x_windows = pack_shank_thigh_windows(
-            shank_windows[:n_windows],
-            thigh_windows[:n_windows],
-            sites=selected_sensors,
-        )
-
-        if use_canonical100:
-            mean = checkpoint_meta.get("mean")
-            scale = checkpoint_meta.get("scale")
-            if mean is None or scale is None:
-                raise ValueError("canonical100 checkpoint is missing mean/scale.")
-            x_windows = prepare_canonical100_inputs(
-                x_windows,
-                as_numpy(mean),
-                as_numpy(scale),
-                apply_lowpass=True,
+            timeline, aligned = align_dual_phone_streams(site_streams, TARGET_FS)
+            shank_windows = segment_windows(aligned["shank"], winsize, OVERLAP)
+            thigh_windows = segment_windows(aligned["thigh"], winsize, OVERLAP)
+            n_windows = min(len(shank_windows), len(thigh_windows))
+            x_windows = pack_shank_thigh_windows(
+                shank_windows[:n_windows],
+                thigh_windows[:n_windows],
+                sites=selected_sensors,
             )
 
-        st.success(
-            f"Using `{os.path.basename(MODEL_PATH)}`; matched accel+gyro on seconds_elapsed; "
-            f"preprocess={'canonical100_v1' if use_canonical100 else 'default'}."
-        )
+            if use_canonical100:
+                mean = checkpoint_meta.get("mean")
+                scale = checkpoint_meta.get("scale")
+                if mean is None or scale is None:
+                    raise ValueError("canonical100 checkpoint is missing mean/scale.")
+                x_windows = prepare_canonical100_inputs(
+                    x_windows,
+                    as_numpy(mean),
+                    as_numpy(scale),
+                    apply_lowpass=True,
+                )
 
-        with st.spinner("Running inference…"):
-            y_pred = run_inference(config, model, x_windows)
+            with st.spinner("Running inference…"):
+                y_pred = run_inference(config, model, x_windows)
 
-    except Exception as exc:
-        st.error(f"Failed to run POC: {exc}")
+            stitched_raw = stitch_windows(y_pred)
+            stitched_disp = negate_pred_knee(stitched_raw)
+            pred_t_full = np.arange(len(stitched_disp)) / TARGET_FS
+
+            true_t = true_y = None
+            align_info = None
+            if uploaded_opensim is not None:
+                opensim_df, opensim_meta = parse_opensim_motion(uploaded_opensim.getvalue())
+                imu_for_onset = 0.5 * (aligned["shank"] + aligned["thigh"])
+                osim_t = opensim_df["time"].to_numpy(dtype=float)
+                true_y = opensim_df[list(OPENSIM_JOINT_COLS)].to_numpy(dtype=float)
+                true_t, align_info = match_joint_peaks(
+                    osim_t,
+                    true_y,
+                    pred_t_full,
+                    stitched_raw,
+                    joint="hip",
+                    fs=TARGET_FS,
+                    coarse_onset_imu=(imu_for_onset if align_method == "match_peaks_hip_onset" else None),
+                    imu_fs=TARGET_FS,
+                )
+                align_info["method"] = align_method
+                align_info["inDegrees"] = float(1.0 if opensim_meta.get("inDegrees", True) else 0.0)
+
+            st.session_state["biomat_run"] = {
+                "y_pred": y_pred,
+                "timeline": timeline,
+                "aligned": aligned,
+                "selected_sensors": selected_sensors,
+                "winsize": winsize,
+                "use_canonical100": use_canonical100,
+                "n_raw": sum(len(t) for t, _ in site_streams.values()),
+                "stitched_disp": stitched_disp,
+                "pred_t_full": pred_t_full,
+                "true_t": true_t,
+                "true_y": true_y,
+                "align_info": align_info,
+            }
+        except Exception as exc:
+            st.error(f"Failed to run POC: {exc}")
+            return
+
+    if "biomat_run" not in st.session_state:
+        st.info("Click **Run BioMAT** after uploading files and confirming column mappings.")
         return
 
+    run = st.session_state["biomat_run"]
+    y_pred = run["y_pred"]
+    timeline = run["timeline"]
+    aligned = run["aligned"]
+    selected_sensors = run["selected_sensors"]
+    stitched_disp = run["stitched_disp"]
+    pred_t_full = run["pred_t_full"]
+    true_t = run["true_t"]
+    true_y = run["true_y"]
+    align_info = run["align_info"]
+
     duration_s = float(timeline[-1] - timeline[0])
-    n_raw = sum(len(t) for t, _ in site_streams.values())
     st.success(
         f"Merged site streams → {len(timeline)} overlapped samples @ {TARGET_FS:.0f} Hz "
-        f"({duration_s:.1f}s; {n_raw} site-timeline points) → {len(x_windows)} windows of {winsize}."
+        f"({duration_s:.1f}s; {run['n_raw']} site-timeline points) → "
+        f"{len(y_pred)} windows of {run['winsize']}."
     )
+    st.info(
+        f"Using model contract: sensors={selected_sensors}, window={run['winsize']}, "
+        f"preprocess={'canonical100_v1' if run['use_canonical100'] else 'default'}"
+    )
+    if align_info is not None:
+        st.info(
+            "OpenSim alignment: "
+            + ", ".join(f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}" for k, v in align_info.items())
+        )
     st.caption(
         "IMU plots show accel (m/s²) + gyro (rad/s) after seconds_elapsed matching and 100 Hz alignment "
         "(before package filter + canonicalize)."
@@ -582,38 +773,6 @@ def main():
             plot_imu_preview(timeline, aligned[site], title=f"{site} IMU @ {TARGET_FS:.0f} Hz"),
             use_container_width=True,
         )
-
-    true_t = true_y = None
-    align_info = None
-    if uploaded_opensim is not None:
-        try:
-            opensim_df, opensim_meta = parse_opensim_motion(uploaded_opensim.getvalue())
-            stitched_for_align = stitch_windows(y_pred)
-            pred_t = np.arange(len(stitched_for_align)) / TARGET_FS
-            imu_for_onset = 0.5 * (aligned["shank"] + aligned["thigh"])
-            osim_t = opensim_df["time"].to_numpy(dtype=float)
-            true_y = opensim_df[list(OPENSIM_JOINT_COLS)].to_numpy(dtype=float)
-
-            true_t, align_info = match_joint_peaks(
-                osim_t,
-                true_y,
-                pred_t,
-                stitched_for_align,
-                joint="hip",
-                fs=TARGET_FS,
-                coarse_onset_imu=(imu_for_onset if align_method == "match_peaks_hip_onset" else None),
-                imu_fs=TARGET_FS,
-            )
-            align_info["method"] = align_method
-            align_info["inDegrees"] = float(1.0 if opensim_meta.get("inDegrees", True) else 0.0)
-
-            st.info(
-                "OpenSim alignment: "
-                + ", ".join(f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}" for k, v in align_info.items())
-            )
-        except Exception as exc:
-            st.warning(f"OpenSim ground truth not plotted: {exc}")
-            true_t = true_y = None
 
     st.subheader("Predicted joint angles")
     view = st.radio("View", ["Stitched trial", "Single window"], horizontal=True)
@@ -629,11 +788,14 @@ def main():
             use_container_width=True,
         )
 
+    # Fragment: editing start/end only refreshes RMSE/MAE, not inference.
+    render_error_metrics(pred_t_full, stitched_disp, true_t, true_y)
+
     out_df = pd.DataFrame(
-        negate_pred_knee(stitch_windows(y_pred)),
+        stitched_disp,
         columns=["hip_flexion_r_deg", "knee_angle_r_deg", "ankle_angle_r_deg"],
     )
-    out_df.insert(0, "time_s", np.arange(len(out_df)) / TARGET_FS)
+    out_df.insert(0, "time_s", pred_t_full)
     st.download_button(
         "Download stitched predictions (CSV)",
         out_df.to_csv(index=False).encode("utf-8"),
