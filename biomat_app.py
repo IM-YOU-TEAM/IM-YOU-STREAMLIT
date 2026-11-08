@@ -118,7 +118,7 @@ selected_activities = st.sidebar.multiselect('Pick Output Activities',
                                            ['LevelGround Walking', 'Ramp Ascent', 'Ramp Descent', 'Stair Ascent', 'Stair Descent'])
 
 index_to_plot = st.sidebar.number_input(
-    'Starting window index (plots 3 windows)',
+    'Starting window index (stitches next 3 windows)',
     min_value=0,
     max_value=5,
     value=0,

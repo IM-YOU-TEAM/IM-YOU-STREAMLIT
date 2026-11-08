@@ -39,13 +39,7 @@ MODEL_STEM = "transformertsai_g1g2rardsasd_g1g2rardsasd.pt"
 # Same options as biomat_app.py
 SENSOR_OPTIONS = {
     "Thigh & Shank": ["thigh", "shank"],
-    "Thigh": ["thigh"],
-    "Shank": ["shank"],
-}
-SENSOR_FILE_KEYS = {
-    "Thigh & Shank": ["thigh", "shank"],
-    "Thigh": ["thigh"],
-    "Shank": ["shank"],
+    'Thigh & Shank & Foot': ['foot', 'shank', 'thigh']
 }
 
 ACC_KEYS = ["acc_x", "acc_y", "acc_z"]

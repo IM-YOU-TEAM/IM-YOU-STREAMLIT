@@ -5,6 +5,21 @@ import plotly.express as px
 from utils.utils import get_subject_index_test, get_activity_index_test
 
 
+def stitch_windows(windows: np.ndarray, overlap: float = 0.5) -> np.ndarray:
+    """Average overlapping windows into a continuous sequence (same as phone IMU POC)."""
+    n, winsize, n_out = windows.shape
+    step = max(int(round(overlap * winsize)), 1)
+    total_len = winsize + (n - 1) * step
+    out = np.zeros((total_len, n_out), dtype=float)
+    weight = np.zeros((total_len, 1), dtype=float)
+    for i in range(n):
+        start = i * step
+        out[start : start + winsize] += windows[i]
+        weight[start : start + winsize] += 1.0
+    weight = np.maximum(weight, 1.0)
+    return out / weight
+
+
 def plot_kinematic_predictions(
     y_true,
     y_pred,
@@ -13,12 +28,10 @@ def plot_kinematic_predictions(
     selected_activities,
     selected_index_to_plot,
     n_windows=3,
+    overlap=0.5,
+    sample_rate=100.0,
 ):
-    """Plot n_windows consecutive samples for Hip/Knee/Ankle (deg).
-
-    Layout: one block of rows per activity; within each activity, one row per window
-    and three columns (Hip, Knee, Ankle).
-    """
+    """Stitch n_windows into one continuous Hip/Knee/Ankle (deg) plot per activity."""
     exact_activity_names = {
         "LevelGround Walking": "levelground1",
         "Ramp Ascent": "rampascent",
@@ -34,22 +47,15 @@ def plot_kinematic_predictions(
         fig.update_layout(title="Select at least one activity")
         return fig
 
-    n_rows = n_activities * n_windows
-    subplot_titles = []
-    for activity in selected_activities:
-        for w in range(n_windows):
-            win_idx = selected_index_to_plot + w
-            for j in range(3):
-                if j == 1:
-                    subplot_titles.append(f"{activity} — window {win_idx}")
-                else:
-                    subplot_titles.append(" ")
-
     fig = make_subplots(
-        rows=n_rows,
+        rows=n_activities,
         cols=3,
-        subplot_titles=subplot_titles,
-        vertical_spacing=min(0.08, 0.4 / max(n_rows, 1)),
+        subplot_titles=[
+            title
+            for activity in selected_activities
+            for title in (f"{activity} — Hip", "Knee", "Ankle")
+        ],
+        vertical_spacing=min(0.12, 0.35 / max(n_activities, 1)),
         horizontal_spacing=0.06,
     )
 
@@ -60,49 +66,54 @@ def plot_kinematic_predictions(
         activity_index = get_activity_index_test(label, activity_to_evaluate)
         selected_index = sorted(set(subject_index) & set(activity_index))
 
-        for w in range(n_windows):
-            row = a * n_windows + w + 1
-            win_idx = selected_index_to_plot + w
-            if win_idx >= len(selected_index):
-                for j, joint_name in enumerate(joint_names):
-                    fig.update_yaxes(title_text=f"{joint_name} (deg)", row=row, col=j + 1)
-                    fig.update_xaxes(title_text="Time (s)", row=row, col=j + 1)
-                continue
-
-            y_pred_to_plot = y_pred[selected_index][win_idx]
-            y_true_to_plot = y_true[selected_index][win_idx]
-            t_s = np.arange(y_true_to_plot.shape[0]) / 100.0
-
+        start = selected_index_to_plot
+        end = min(start + n_windows, len(selected_index))
+        if start >= len(selected_index) or end <= start:
             for j, joint_name in enumerate(joint_names):
-                fig.append_trace(
-                    go.Scatter(
-                        x=t_s,
-                        y=-y_true_to_plot[:, j],
-                        mode="lines",
-                        name="True",
-                        legendgroup="True",
-                        showlegend=show_legend,
-                        line=dict(color=colors[5], dash="solid"),
-                    ),
-                    row=row,
-                    col=j + 1,
-                )
-                fig.append_trace(
-                    go.Scatter(
-                        x=t_s,
-                        y=-y_pred_to_plot[:, j],
-                        mode="lines",
-                        name="Prediction",
-                        legendgroup="Prediction",
-                        showlegend=show_legend,
-                        line=dict(color=colors[8], dash="dot"),
-                    ),
-                    row=row,
-                    col=j + 1,
-                )
-                show_legend = False
-                fig.update_yaxes(title_text=f"{joint_name} (deg)", row=row, col=j + 1)
-                fig.update_xaxes(title_text="Time (s)", row=row, col=j + 1)
+                fig.update_yaxes(title_text=f"{joint_name} (deg)", row=a + 1, col=j + 1)
+                fig.update_xaxes(title_text="Time (s)", row=a + 1, col=j + 1)
+            continue
 
-    fig.update_layout(height=max(420, 280 * n_rows), width=1000)
+        true_windows = y_true[selected_index][start:end]
+        pred_windows = y_pred[selected_index][start:end]
+        true_stitched = stitch_windows(true_windows, overlap=overlap)
+        pred_stitched = stitch_windows(pred_windows, overlap=overlap)
+        t_s = np.arange(true_stitched.shape[0]) / sample_rate
+
+        for j, joint_name in enumerate(joint_names):
+            fig.append_trace(
+                go.Scatter(
+                    x=t_s,
+                    y=-true_stitched[:, j],
+                    mode="lines",
+                    name="True",
+                    legendgroup="True",
+                    showlegend=show_legend,
+                    line=dict(color=colors[5], dash="solid"),
+                ),
+                row=a + 1,
+                col=j + 1,
+            )
+            fig.append_trace(
+                go.Scatter(
+                    x=t_s,
+                    y=-pred_stitched[:, j],
+                    mode="lines",
+                    name="Prediction",
+                    legendgroup="Prediction",
+                    showlegend=show_legend,
+                    line=dict(color=colors[8], dash="dot"),
+                ),
+                row=a + 1,
+                col=j + 1,
+            )
+            show_legend = False
+            fig.update_yaxes(title_text=f"{joint_name} (deg)", row=a + 1, col=j + 1)
+            fig.update_xaxes(title_text="Time (s)", row=a + 1, col=j + 1)
+
+    fig.update_layout(
+        height=max(420, 360 * n_activities),
+        width=1000,
+        title=f"Stitched kinematics ({n_windows} windows, {int(overlap * 100)}% overlap)",
+    )
     return fig
