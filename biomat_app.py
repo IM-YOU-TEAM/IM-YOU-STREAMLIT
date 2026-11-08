@@ -1,6 +1,5 @@
 import streamlit as st
 import os
-import torch
 
 from torch.utils.data import DataLoader
 from config import get_config_universal
@@ -23,6 +22,45 @@ sensor_options = {'Thigh & Shank & Foot': ['foot', 'shank', 'thigh'],
                   'Thigh': ['thigh'],
                   'Shank': ['shank'],
                   'Foot': ['foot']}
+model_names = {'CNNLSTM': 'hernandez2021cnnlstm', 'BiLSTM': 'bilstm', 'BioMAT': 'transformertsai'}
+sensor_file_keys = {
+    'Thigh & Shank & Foot': 'thighshankfoot',
+    'Thigh & Shank': 'thighshank',
+    'Thigh & Foot': 'thighfoot',
+    'Shank & Foot': 'shankfoot',
+    'Thigh': 'thigh',
+    'Shank': 'shank',
+    'Foot': 'foot',
+}
+
+
+def resolve_model_path(sensor_name, model_name):
+    sensor_key = sensor_file_keys[sensor_name]
+    stem = model_names[model_name]
+    if sensor_key == 'thighshankfoot':
+        model_file = f'{stem}_g1g2rardsasd_g1g2rardsasd.pt'
+    else:
+        model_file = f'{sensor_key}_{stem}_g1g2rardsasd_g1g2rardsasd.pt'
+    return os.path.join('./caches/trained_model/', model_file)
+
+
+def apply_model_contract(config, model, model_name):
+    """Align data config to the loaded model (seq_len, optional checkpoint metadata)."""
+    config['model_name'] = model_names[model_name]
+    seq_len = getattr(model, 'seq_len', None)
+    if seq_len is None and hasattr(model, 'W_pos'):
+        seq_len = int(model.W_pos.shape[0])
+    if seq_len is not None:
+        config['target_padding_length'] = int(seq_len)
+
+    meta = getattr(model, 'checkpoint_meta', None) or {}
+    if meta.get('window_length'):
+        config['target_padding_length'] = int(meta['window_length'])
+    if meta.get('sites'):
+        config['selected_sensors'] = list(meta['sites'])
+    if meta.get('targets'):
+        config['selected_opensim_labels'] = list(meta['targets'])
+    return config, meta
 
 @st.cache_data
 def fetch_data(config):
@@ -42,22 +80,8 @@ def fetch_data(config):
     return test_dataloader, kihadataset_test
 
 # @st.cache_data
-def fetch_model(sensor_name, model_name):
-    model_names = {'CNNLSTM':'hernandez2021cnnlstm', 'BiLSTM':'bilstm', 'BioMAT': 'transformertsai'}
-    sensor_names = {'Thigh & Shank & Foot':'thighshankfoot',
-                    'Thigh & Shank':'thighshank',
-                   'Thigh & Foot':'thighfoot',
-                   'Shank & Foot':'shankfoot',
-                   'Thigh':'thigh',
-                   'Shank':'shank',
-                   'Foot':'foot'}
-    if sensor_names[sensor_name]=='thighshankfoot':
-        model_file = model_names[model_name] + '_g1g2rardsasd_g1g2rardsasd.pt'
-    else:
-        model_file = sensor_names[sensor_name] + '_' + model_names[model_name]+'_g1g2rardsasd_g1g2rardsasd.pt'
-    # st.write(model_file)
-    model = load_trained_model(os.path.join('./caches/trained_model/', model_file))
-    return model
+def fetch_model(model_path):
+    return load_trained_model(model_path)
 
 # @st.cache_data
 def fetch_predictions(model):
@@ -93,21 +117,45 @@ st.sidebar.title('Activity')
 selected_activities = st.sidebar.multiselect('Pick Output Activities',
                                            ['LevelGround Walking', 'Ramp Ascent', 'Ramp Descent', 'Stair Ascent', 'Stair Descent'])
 
-index_to_plot = st.sidebar.number_input('Enter a number between 0 and 5', min_value=0, max_value=5)
+index_to_plot = st.sidebar.number_input(
+    'Starting window index (plots 3 windows)',
+    min_value=0,
+    max_value=5,
+    value=0,
+)
 
 if st.sidebar.button('Predict'):
+    model_path = resolve_model_path(selected_sensor, selected_model)
+    if not os.path.isfile(model_path):
+        st.error(f'Model file not found: {model_path}')
+        st.stop()
+
+    with st.spinner('Model is loading...'):
+        model = fetch_model(model_path)
+    config, checkpoint_meta = apply_model_contract(config, model, selected_model)
+    st.info(
+        f"Using model contract: sensors={config['selected_sensors']}, "
+        f"window={config['target_padding_length']}"
+    )
+    st.success('Model is loaded!')
+
     with st.spinner('Data is loading...'):
         test_dataloader, kihadataset_test = fetch_data(config)
     st.success('Data is loaded!')
-    with st.spinner('Model is loading...'):
-        model = fetch_model(selected_sensor, selected_model)
-    st.success('Model is loaded!')
+
     with st.spinner('Prediction ...'):
         y_pred, y_true, loss = fetch_predictions(model)
     st.success('Prediction is Completed!')
     subject = 'AB' + str(selected_subject)
-    fig = plot_kinematic_predictions(y_true, y_pred, kihadataset_test['labels'], subject,
-                                 selected_activities=selected_activities, selected_index_to_plot=index_to_plot)
+    fig = plot_kinematic_predictions(
+        y_true,
+        y_pred,
+        kihadataset_test['labels'],
+        subject,
+        selected_activities=selected_activities,
+        selected_index_to_plot=index_to_plot,
+        n_windows=3,
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 
