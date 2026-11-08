@@ -20,99 +20,25 @@ def stitch_windows(windows: np.ndarray, overlap: float = 0.5) -> np.ndarray:
     return out / weight
 
 
-ACTIVITY_NAME_MAP = {
-    "LevelGround Walking": "levelground1",
-    "Ramp Ascent": "rampascent",
-    "Ramp Descent": "rampdescent",
-    "Stair Ascent": "stairascent",
-    "Stair Descent": "stairdescent",
-}
-
-
-def selected_window_indices(label, selected_subject, activity_display_name):
-    activity_to_evaluate = ACTIVITY_NAME_MAP[activity_display_name]
-    subject_index = get_subject_index_test(label, selected_subject)
-    activity_index = get_activity_index_test(label, activity_to_evaluate)
-    return sorted(set(subject_index) & set(activity_index))
-
-
-def plot_imu_site(time_s, imu_6, title, sample_rate=100.0):
-    """Plot one site's accel XYZ + gyro XYZ (same layout as test_phone_imu)."""
-    fig = make_subplots(
-        rows=2,
-        cols=1,
-        shared_xaxes=True,
-        subplot_titles=["Acceleration", "Gyroscope"],
-    )
-    for i, name in enumerate(["Ax", "Ay", "Az"]):
-        fig.add_trace(go.Scatter(x=time_s, y=imu_6[:, i], mode="lines", name=name), row=1, col=1)
-    for i, name in enumerate(["Gx", "Gy", "Gz"]):
-        fig.add_trace(go.Scatter(x=time_s, y=imu_6[:, i + 3], mode="lines", name=name), row=2, col=1)
-    fig.update_yaxes(title_text="Accel", row=1, col=1)
-    fig.update_yaxes(title_text="Gyro", row=2, col=1)
-    fig.update_xaxes(title_text="Time (s)", row=2, col=1)
-    fig.update_layout(height=420, title=title, margin=dict(l=40, r=20, t=60, b=40))
-    return fig
-
-
-def plot_raw_imu_for_selection(
-    x_windows,
-    label,
-    selected_subject,
-    selected_activities,
-    selected_sensors,
-    features_per_sensor=6,
-    overlap=0.5,
-    sample_rate=100.0,
-):
-    """
-    Stitch raw (pre-canonicalize) IMU windows for subject+activity and
-    return one accel/gyro figure per site per activity.
-    """
-    figures = []
-    if x_windows is None or len(selected_activities) == 0:
-        return figures
-    x_windows = np.asarray(x_windows)
-    expected_c = len(selected_sensors) * features_per_sensor
-    if x_windows.ndim != 3 or x_windows.shape[-1] != expected_c:
-        return figures
-
-    for activity in selected_activities:
-        idxs = selected_window_indices(label, selected_subject, activity)
-        if not idxs:
-            continue
-        stitched = stitch_windows(x_windows[idxs], overlap=overlap)
-        t_s = np.arange(stitched.shape[0]) / sample_rate
-        for s, site in enumerate(selected_sensors):
-            start = s * features_per_sensor
-            imu_6 = stitched[:, start : start + features_per_sensor]
-            figures.append(
-                plot_imu_site(
-                    t_s,
-                    imu_6,
-                    title=f"{selected_subject} / {activity} / {site} IMU "
-                    f"(raw windows, before canonicalize)",
-                    sample_rate=sample_rate,
-                )
-            )
-    return figures
-
-
 def plot_kinematic_predictions(
     y_true,
     y_pred,
     label,
     selected_subject,
     selected_activities,
-    selected_index_to_plot=0,
-    n_windows=None,
+    selected_index_to_plot,
+    n_windows=3,
     overlap=0.5,
     sample_rate=100.0,
 ):
-    """Stitch windows into continuous Hip/Knee/Ankle (deg) plots per activity.
-
-    n_windows=None stitches the entire subject+activity selection.
-    """
+    """Stitch n_windows into one continuous Hip/Knee/Ankle (deg) plot per activity."""
+    exact_activity_names = {
+        "LevelGround Walking": "levelground1",
+        "Ramp Ascent": "rampascent",
+        "Ramp Descent": "rampdescent",
+        "Stair Ascent": "stairascent",
+        "Stair Descent": "stairdescent",
+    }
     colors = px.colors.sequential.Turbo
     joint_names = ["Hip", "Knee", "Ankle"]
     n_activities = len(selected_activities)
@@ -134,16 +60,14 @@ def plot_kinematic_predictions(
     )
 
     show_legend = True
-    used_windows = 0
     for a, activity in enumerate(selected_activities):
-        selected_index = selected_window_indices(label, selected_subject, activity)
+        activity_to_evaluate = exact_activity_names[activity]
+        subject_index = get_subject_index_test(label, selected_subject)
+        activity_index = get_activity_index_test(label, activity_to_evaluate)
+        selected_index = sorted(set(subject_index) & set(activity_index))
 
-        if n_windows is None:
-            start, end = 0, len(selected_index)
-        else:
-            start = selected_index_to_plot
-            end = min(start + n_windows, len(selected_index))
-
+        start = selected_index_to_plot
+        end = min(start + n_windows, len(selected_index))
         if start >= len(selected_index) or end <= start:
             for j, joint_name in enumerate(joint_names):
                 fig.update_yaxes(title_text=f"{joint_name} (deg)", row=a + 1, col=j + 1)
@@ -152,7 +76,6 @@ def plot_kinematic_predictions(
 
         true_windows = y_true[selected_index][start:end]
         pred_windows = y_pred[selected_index][start:end]
-        used_windows = max(used_windows, end - start)
         true_stitched = stitch_windows(true_windows, overlap=overlap)
         pred_stitched = stitch_windows(pred_windows, overlap=overlap)
         t_s = np.arange(true_stitched.shape[0]) / sample_rate
@@ -188,10 +111,9 @@ def plot_kinematic_predictions(
             fig.update_yaxes(title_text=f"{joint_name} (deg)", row=a + 1, col=j + 1)
             fig.update_xaxes(title_text="Time (s)", row=a + 1, col=j + 1)
 
-    span = "all windows" if n_windows is None else f"{used_windows} windows"
     fig.update_layout(
         height=max(420, 360 * n_activities),
         width=1000,
-        title=f"Stitched kinematics ({span}, {int(overlap * 100)}% overlap)",
+        title=f"Stitched kinematics ({n_windows} windows, {int(overlap * 100)}% overlap)",
     )
     return fig

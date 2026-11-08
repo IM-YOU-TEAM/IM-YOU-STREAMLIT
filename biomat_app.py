@@ -12,10 +12,7 @@ from preprocessing.canonicalize import (
 )
 from test import Test
 from utils.pytorchtools import load_trained_model, peek_checkpoint_meta
-from visualization.steamlit_plot import (
-    plot_kinematic_predictions,
-    plot_raw_imu_for_selection,
-)
+from visualization.steamlit_plot import plot_kinematic_predictions
 
 
 dataset_name = 'camargo'
@@ -92,9 +89,6 @@ def fetch_data(config, use_canonical100=False, mean=None, scale=None):
         kihadataset_test['x'],
         kihadataset_test['y'], kihadataset_test['labels'])
 
-    # Keep pre-canonicalize IMU for plotting (same idea as test_phone_imu previews).
-    raw_test_x = np.asarray(kihadataset_test['x'], dtype=np.float64).copy()
-
     if use_canonical100:
         if mean is None or scale is None:
             raise ValueError('canonical100 checkpoints require saved mean and scale')
@@ -116,7 +110,7 @@ def fetch_data(config, use_canonical100=False, mean=None, scale=None):
                                   transform_method=transform_method,
                                   scaler=None if use_canonical100 else train_dataset.scaler)
     test_dataloader = DataLoader(dataset=test_dataset, batch_size=config['batch_size'], shuffle=False)
-    return test_dataloader, kihadataset_test, raw_test_x
+    return test_dataloader, kihadataset_test
 
 # @st.cache_data
 def fetch_model(model_path):
@@ -156,6 +150,13 @@ st.sidebar.title('Activity')
 selected_activities = st.sidebar.multiselect('Pick Output Activities',
                                            ['LevelGround Walking', 'Ramp Ascent', 'Ramp Descent', 'Stair Ascent', 'Stair Descent'])
 
+index_to_plot = st.sidebar.number_input(
+    'Starting window index (stitches next 3 windows)',
+    min_value=0,
+    max_value=5,
+    value=0,
+)
+
 if st.sidebar.button('Predict'):
     model_path = resolve_model_path(selected_sensor, selected_model)
     if not os.path.isfile(model_path):
@@ -184,7 +185,7 @@ if st.sidebar.button('Predict'):
         if use_canonical100:
             mean = np.asarray(mean.detach().cpu() if hasattr(mean, 'detach') else mean)
             scale = np.asarray(scale.detach().cpu() if hasattr(scale, 'detach') else scale)
-        test_dataloader, kihadataset_test, raw_test_x = fetch_data(
+        test_dataloader, kihadataset_test = fetch_data(
             config,
             use_canonical100=use_canonical100,
             mean=mean,
@@ -196,34 +197,13 @@ if st.sidebar.button('Predict'):
         y_pred, y_true, loss = fetch_predictions(model)
     st.success('Prediction is Completed!')
     subject = 'AB' + str(selected_subject)
-
-    st.subheader('Raw IMU (stitched windows)')
-    st.caption(
-        'Acceleration / gyroscope from Camargo windows before canonicalize / StandardScaler, '
-        'stitched across all selected subject+activity windows.'
-    )
-    imu_figs = plot_raw_imu_for_selection(
-        raw_test_x,
-        kihadataset_test['labels'],
-        subject,
-        selected_activities,
-        config['selected_sensors'],
-    )
-    if not selected_activities:
-        st.warning('Select at least one activity to plot IMU and kinematics.')
-    elif not imu_figs:
-        st.warning('No IMU windows found for this subject/activity selection.')
-    else:
-        for fig_imu in imu_figs:
-            st.plotly_chart(fig_imu, use_container_width=True)
-
-    st.subheader('Joint angles (entire selection)')
     fig = plot_kinematic_predictions(
         y_true,
         y_pred,
         kihadataset_test['labels'],
         subject,
         selected_activities=selected_activities,
-        n_windows=None,
+        selected_index_to_plot=index_to_plot,
+        n_windows=3,
     )
     st.plotly_chart(fig, use_container_width=True)

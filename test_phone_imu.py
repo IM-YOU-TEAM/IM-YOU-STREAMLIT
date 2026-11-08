@@ -1,11 +1,14 @@
 """
 POC Streamlit app: run the thigh/shank BioMAT model on phone IMU recordings.
 
-Requires four files:
+Requires four IMU files:
   - RIGHT SHANK accelerometer_uncalibrated
   - RIGHT SHANK gyroscope
   - RIGHT THIGH accelerometer_uncalibrated
   - RIGHT THIGH gyroscope
+
+Optional OpenSim motion CSV/MOT (hip_flexion_r, knee_angle_r, ankle_angle_r) is
+aligned to the phone timeline via preprocessing.onset_align (stillness→walk onset).
 
 Accel and gyro for each site are merged on `seconds_elapsed`, then shank/thigh
 are aligned to a shared 100 Hz timeline. Uses the same canonical100_v1 contract
@@ -38,6 +41,11 @@ from preprocessing.canonicalize import (
     is_canonical100_meta,
     prepare_canonical100_inputs,
 )
+from preprocessing.onset_align import (
+    OPENSIM_JOINT_COLS,
+    match_onsets,
+    parse_opensim_motion,
+)
 from test import Test
 from utils.pytorchtools import load_trained_model, peek_checkpoint_meta
 
@@ -53,7 +61,12 @@ MODEL_PATH = os.path.join(
     "thighshank_transformertsai_g1g2rardsasd_g1g2rardsasd.pt",
 )
 
-UploadKey = str  # e.g. "shank_accel"
+ALIGN_CHOICES = {
+    "match_onsets": "Match stillness→walk onsets (IMU gyro + OpenSim joints)",
+    "match_onsets_xcorr": "Match onsets + knee cross-correlation fine-tune",
+    "manual": "Manual OpenSim time offset",
+    "start_together": "Start together (OpenSim t=0 at IMU t=0)",
+}
 
 
 def _norm(col: str) -> str:
@@ -270,18 +283,34 @@ def stitch_windows(windows: np.ndarray, overlap: float = OVERLAP) -> np.ndarray:
     return out / weight
 
 
-def plot_predictions(y_pred: np.ndarray, window_index: int, flip_sign: bool) -> go.Figure:
+def plot_predictions(
+    y_pred: np.ndarray,
+    window_index: int,
+    true_t: Optional[np.ndarray] = None,
+    true_y: Optional[np.ndarray] = None,
+) -> go.Figure:
     pred = y_pred[window_index]
-    if flip_sign:
-        pred = -pred
     t = np.arange(pred.shape[0]) / TARGET_FS
     fig = make_subplots(rows=1, cols=3, subplot_titles=JOINT_NAMES)
     for j, name in enumerate(JOINT_NAMES):
         fig.add_trace(
-            go.Scatter(x=t, y=pred[:, j], mode="lines", name=name, showlegend=False),
+            go.Scatter(x=t, y=pred[:, j], mode="lines", name=f"Pred {name}", showlegend=(j == 0)),
             row=1,
             col=j + 1,
         )
+        if true_t is not None and true_y is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=true_t,
+                    y=true_y[:, j],
+                    mode="lines",
+                    name=f"OpenSim {name}",
+                    line=dict(dash="dash"),
+                    showlegend=(j == 0),
+                ),
+                row=1,
+                col=j + 1,
+            )
         fig.update_yaxes(title_text="Angle (deg)", row=1, col=j + 1)
         fig.update_xaxes(title_text="Time (s)", row=1, col=j + 1)
     fig.update_layout(
@@ -292,22 +321,37 @@ def plot_predictions(y_pred: np.ndarray, window_index: int, flip_sign: bool) -> 
     return fig
 
 
-def plot_stitched(y_pred: np.ndarray, flip_sign: bool) -> go.Figure:
+def plot_stitched(
+    y_pred: np.ndarray,
+    true_t: Optional[np.ndarray] = None,
+    true_y: Optional[np.ndarray] = None,
+) -> go.Figure:
     stitched = stitch_windows(y_pred)
-    if flip_sign:
-        stitched = -stitched
     t = np.arange(stitched.shape[0]) / TARGET_FS
     fig = make_subplots(rows=1, cols=3, subplot_titles=JOINT_NAMES)
     for j, name in enumerate(JOINT_NAMES):
         fig.add_trace(
-            go.Scatter(x=t, y=stitched[:, j], mode="lines", name=name, showlegend=False),
+            go.Scatter(x=t, y=stitched[:, j], mode="lines", name=f"Pred {name}", showlegend=(j == 0)),
             row=1,
             col=j + 1,
         )
+        if true_t is not None and true_y is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=true_t,
+                    y=true_y[:, j],
+                    mode="lines",
+                    name=f"OpenSim {name}",
+                    line=dict(dash="dash"),
+                    showlegend=(j == 0),
+                ),
+                row=1,
+                col=j + 1,
+            )
         fig.update_yaxes(title_text="Angle (deg)", row=1, col=j + 1)
         fig.update_xaxes(title_text="Time (s)", row=1, col=j + 1)
     fig.update_layout(
-        title="Stitched level-ground walking kinematics",
+        title="Stitched level-ground walking kinematics (pred vs OpenSim)",
         height=420,
         margin=dict(l=40, r=20, t=60, b=40),
     )
@@ -400,7 +444,26 @@ def main():
             type=["csv", "xlsx", "xls"],
             key="thigh_gyro_upload",
         )
-        flip_sign = st.checkbox("Flip prediction sign (Camargo convention)", value=True)
+        st.header("OpenSim ground truth (optional)")
+        uploaded_opensim = st.file_uploader(
+            "OpenSim motion CSV/MOT",
+            type=["csv", "mot", "txt"],
+            key="opensim_upload",
+            help="Coordinates export with endheader; needs hip_flexion_r, knee_angle_r, ankle_angle_r.",
+        )
+        align_method = st.selectbox(
+            "Align OpenSim to phone IMU",
+            list(ALIGN_CHOICES.keys()),
+            format_func=lambda k: ALIGN_CHOICES[k],
+            index=0,
+        )
+        manual_offset_s = st.number_input(
+            "Manual OpenSim offset (s)",
+            value=0.0,
+            step=0.01,
+            help="Used when alignment mode is Manual: t_plot = opensim_time + offset.",
+            disabled=(align_method != "manual"),
+        )
         st.markdown("**Activity:** Level ground walking")
         st.caption("Expected units: acceleration m/s², gyroscope rad/s (no conversion applied).")
 
@@ -518,16 +581,68 @@ def main():
             use_container_width=True,
         )
 
+    true_t = true_y = None
+    align_info = None
+    if uploaded_opensim is not None:
+        try:
+            opensim_df, opensim_meta = parse_opensim_motion(uploaded_opensim.getvalue())
+            stitched_for_align = stitch_windows(y_pred)
+            pred_t = np.arange(len(stitched_for_align)) / TARGET_FS
+            # Mean of shank+thigh IMU on the model-relative timeline (t=0 at series start).
+            imu_for_onset = 0.5 * (aligned["shank"] + aligned["thigh"])
+
+            if align_method == "start_together":
+                true_t = opensim_df["time"].to_numpy(dtype=float) - float(opensim_df["time"].iloc[0])
+                true_y = opensim_df[list(OPENSIM_JOINT_COLS)].to_numpy(dtype=float)
+                align_info = {"method": "start_together", "offset_s": float(-opensim_df["time"].iloc[0])}
+            elif align_method == "manual":
+                true_t, align_info = match_onsets(
+                    opensim_df["time"].to_numpy(dtype=float),
+                    opensim_df[list(OPENSIM_JOINT_COLS)].to_numpy(dtype=float),
+                    imu_for_onset,
+                    imu_fs=TARGET_FS,
+                    manual_offset_s=float(manual_offset_s),
+                )
+                true_y = opensim_df[list(OPENSIM_JOINT_COLS)].to_numpy(dtype=float)
+                align_info["method"] = "manual"
+            else:
+                true_t, align_info = match_onsets(
+                    opensim_df["time"].to_numpy(dtype=float),
+                    opensim_df[list(OPENSIM_JOINT_COLS)].to_numpy(dtype=float),
+                    imu_for_onset,
+                    imu_fs=TARGET_FS,
+                    refine_with_knee_xcorr=(align_method == "match_onsets_xcorr"),
+                    pred_time_s=pred_t,
+                    pred_angles_deg=stitched_for_align,
+                )
+                true_y = opensim_df[list(OPENSIM_JOINT_COLS)].to_numpy(dtype=float)
+                align_info["method"] = align_method
+                align_info["inDegrees"] = bool(opensim_meta.get("inDegrees", True))
+
+            st.info(
+                "OpenSim alignment: "
+                + ", ".join(f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}" for k, v in align_info.items())
+            )
+        except Exception as exc:
+            st.warning(f"OpenSim ground truth not plotted: {exc}")
+            true_t = true_y = None
+
     st.subheader("Predicted joint angles")
     view = st.radio("View", ["Stitched trial", "Single window"], horizontal=True)
     if view == "Stitched trial":
-        st.plotly_chart(plot_stitched(y_pred, flip_sign=flip_sign), use_container_width=True)
+        st.plotly_chart(
+            plot_stitched(y_pred, true_t=true_t, true_y=true_y),
+            use_container_width=True,
+        )
     else:
         idx = st.slider("Window index", 0, max(len(y_pred) - 1, 0), 0)
-        st.plotly_chart(plot_predictions(y_pred, idx, flip_sign=flip_sign), use_container_width=True)
+        st.plotly_chart(
+            plot_predictions(y_pred, idx, true_t=true_t, true_y=true_y),
+            use_container_width=True,
+        )
 
     out_df = pd.DataFrame(
-        stitch_windows(y_pred) * (-1.0 if flip_sign else 1.0),
+        stitch_windows(y_pred),
         columns=["hip_flexion_r_deg", "knee_angle_r_deg", "ankle_angle_r_deg"],
     )
     out_df.insert(0, "time_s", np.arange(len(out_df)) / TARGET_FS)
