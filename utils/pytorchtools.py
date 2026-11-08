@@ -65,7 +65,7 @@ def _build_transformertsai_from_checkpoint(checkpoint):
 
 
 def peek_checkpoint_meta(path):
-    """Return checkpoint metadata dict for state_dict checkpoints; {} for full modules."""
+    """Return checkpoint metadata for state_dict dicts or modules with checkpoint_meta."""
     obj = torch.load(
         path,
         map_location=torch.device('cpu'),
@@ -73,7 +73,8 @@ def peek_checkpoint_meta(path):
     )
     if isinstance(obj, dict) and 'state_dict' in obj:
         return {k: v for k, v in obj.items() if k != 'state_dict'}
-    return {}
+    meta = getattr(obj, 'checkpoint_meta', None)
+    return dict(meta) if meta else {}
 
 
 def load_trained_model(path):

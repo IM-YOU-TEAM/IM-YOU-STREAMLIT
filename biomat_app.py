@@ -1,12 +1,17 @@
 import streamlit as st
 import os
 
+import numpy as np
 from torch.utils.data import DataLoader
 from config import get_config_universal
 from dataset import DataSet
 from datasetbuilder import DataSetBuilder
+from preprocessing.canonicalize import (
+    is_canonical100_meta,
+    prepare_canonical100_inputs,
+)
 from test import Test
-from utils.pytorchtools import load_trained_model
+from utils.pytorchtools import load_trained_model, peek_checkpoint_meta
 from visualization.steamlit_plot import plot_kinematic_predictions
 
 
@@ -32,6 +37,7 @@ sensor_file_keys = {
     'Shank': 'shank',
     'Foot': 'foot',
 }
+NO_TRANSFORM = {'data_transformer_method': None, 'data_transformer_by': 'by_var'}
 
 
 def resolve_model_path(sensor_name, model_name):
@@ -44,7 +50,16 @@ def resolve_model_path(sensor_name, model_name):
     return os.path.join('./caches/trained_model/', model_file)
 
 
-def apply_model_contract(config, model, model_name):
+def merge_checkpoint_meta(model, model_path):
+    """Prefer file metadata (mean/scale/preprocess); fall back to attrs on loaded model."""
+    meta = dict(peek_checkpoint_meta(model_path) or {})
+    model_meta = getattr(model, 'checkpoint_meta', None) or {}
+    for key, value in model_meta.items():
+        meta.setdefault(key, value)
+    return meta
+
+
+def apply_model_contract(config, model, model_name, checkpoint_meta=None):
     """Align data config to the loaded model (seq_len, optional checkpoint metadata)."""
     config['model_name'] = model_names[model_name]
     seq_len = getattr(model, 'seq_len', None)
@@ -53,7 +68,7 @@ def apply_model_contract(config, model, model_name):
     if seq_len is not None:
         config['target_padding_length'] = int(seq_len)
 
-    meta = getattr(model, 'checkpoint_meta', None) or {}
+    meta = checkpoint_meta if checkpoint_meta is not None else (getattr(model, 'checkpoint_meta', None) or {})
     if meta.get('window_length'):
         config['target_padding_length'] = int(meta['window_length'])
     if meta.get('sites'):
@@ -62,8 +77,9 @@ def apply_model_contract(config, model, model_name):
         config['selected_opensim_labels'] = list(meta['targets'])
     return config, meta
 
+
 @st.cache_data
-def fetch_data(config):
+def fetch_data(config, use_canonical100=False, mean=None, scale=None):
     dataset_handler = DataSet(config, load_dataset=True)
     kihadataset_train, kihadataset_test = dataset_handler.run_dataset_split_loop()
     kihadataset_train['x'], kihadataset_train['y'], kihadataset_train['labels'] = dataset_handler.run_segmentation(
@@ -72,10 +88,27 @@ def fetch_data(config):
     kihadataset_test['x'], kihadataset_test['y'], kihadataset_test['labels'] = dataset_handler.run_segmentation(
         kihadataset_test['x'],
         kihadataset_test['y'], kihadataset_test['labels'])
+
+    if use_canonical100:
+        if mean is None or scale is None:
+            raise ValueError('canonical100 checkpoints require saved mean and scale')
+        mean = np.asarray(mean)
+        scale = np.asarray(scale)
+        kihadataset_train['x'] = prepare_canonical100_inputs(
+            kihadataset_train['x'], mean, scale, apply_lowpass=True)
+        kihadataset_test['x'] = prepare_canonical100_inputs(
+            kihadataset_test['x'], mean, scale, apply_lowpass=True)
+        transform_method = NO_TRANSFORM
+        train_scaler = None
+    else:
+        transform_method = config['data_transformer']
+        train_scaler = None
+
     train_dataset = DataSetBuilder(kihadataset_train['x'], kihadataset_train['y'], kihadataset_train['labels'],
-                                   transform_method=config['data_transformer'], scaler=None)
+                                   transform_method=transform_method, scaler=train_scaler)
     test_dataset = DataSetBuilder(kihadataset_test['x'], kihadataset_test['y'], kihadataset_test['labels'],
-                                  transform_method=config['data_transformer'], scaler=train_dataset.scaler)
+                                  transform_method=transform_method,
+                                  scaler=None if use_canonical100 else train_dataset.scaler)
     test_dataloader = DataLoader(dataset=test_dataset, batch_size=config['batch_size'], shuffle=False)
     return test_dataloader, kihadataset_test
 
@@ -132,15 +165,32 @@ if st.sidebar.button('Predict'):
 
     with st.spinner('Model is loading...'):
         model = fetch_model(model_path)
-    config, checkpoint_meta = apply_model_contract(config, model, selected_model)
+    checkpoint_meta = merge_checkpoint_meta(model, model_path)
+    config, checkpoint_meta = apply_model_contract(
+        config, model, selected_model, checkpoint_meta=checkpoint_meta)
+    use_canonical100 = is_canonical100_meta(checkpoint_meta)
     st.info(
         f"Using model contract: sensors={config['selected_sensors']}, "
-        f"window={config['target_padding_length']}"
+        f"window={config['target_padding_length']}, "
+        f"preprocess={'canonical100_v1' if use_canonical100 else 'default'}"
     )
     st.success('Model is loaded!')
 
     with st.spinner('Data is loading...'):
-        test_dataloader, kihadataset_test = fetch_data(config)
+        mean = checkpoint_meta.get('mean') if use_canonical100 else None
+        scale = checkpoint_meta.get('scale') if use_canonical100 else None
+        if use_canonical100 and (mean is None or scale is None):
+            st.error('canonical100 checkpoint is missing mean/scale; cannot standardize inputs.')
+            st.stop()
+        if use_canonical100:
+            mean = np.asarray(mean.detach().cpu() if hasattr(mean, 'detach') else mean)
+            scale = np.asarray(scale.detach().cpu() if hasattr(scale, 'detach') else scale)
+        test_dataloader, kihadataset_test = fetch_data(
+            config,
+            use_canonical100=use_canonical100,
+            mean=mean,
+            scale=scale,
+        )
     st.success('Data is loaded!')
 
     with st.spinner('Prediction ...'):
@@ -157,6 +207,3 @@ if st.sidebar.button('Predict'):
         n_windows=3,
     )
     st.plotly_chart(fig, use_container_width=True)
-
-
-
