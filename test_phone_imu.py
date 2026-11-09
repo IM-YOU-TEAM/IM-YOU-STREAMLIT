@@ -361,6 +361,45 @@ def stitch_windows(windows: np.ndarray, overlap: float = OVERLAP) -> np.ndarray:
     return out / weight
 
 
+def _joint_legend_id(row: int) -> str:
+    """Plotly multi-legend id for subplot row (1-based)."""
+    return "legend" if row == 1 else f"legend{row}"
+
+
+def _style_joint_subplots(fig: go.Figure, title: str) -> go.Figure:
+    """Show Time (s) + tick labels on every row, and a legend on each subplot."""
+    # Equal-height domains: tops near 1.0 / 0.64 / 0.28 for in-plot legends.
+    legend_ys = (0.99, 0.63, 0.27)
+    legend_layout = {}
+    for i, y in enumerate(legend_ys):
+        key = "legend" if i == 0 else f"legend{i + 1}"
+        legend_layout[key] = dict(
+            x=0.99,
+            y=y,
+            xanchor="right",
+            yanchor="top",
+            bgcolor="rgba(255,255,255,0.75)",
+            bordercolor="rgba(0,0,0,0.15)",
+            borderwidth=1,
+            font=dict(size=11),
+        )
+        fig.update_yaxes(title_text="Angle (deg)", row=i + 1, col=1)
+        fig.update_xaxes(
+            title_text="Time (s)",
+            showticklabels=True,
+            showgrid=True,
+            row=i + 1,
+            col=1,
+        )
+    fig.update_layout(
+        title=title,
+        height=900,
+        margin=dict(l=40, r=20, t=60, b=40),
+        **legend_layout,
+    )
+    return fig
+
+
 def plot_predictions(
     y_pred: np.ndarray,
     window_index: int,
@@ -371,8 +410,16 @@ def plot_predictions(
     t = np.arange(pred.shape[0]) / TARGET_FS
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, subplot_titles=JOINT_NAMES)
     for j, name in enumerate(JOINT_NAMES):
+        legend = _joint_legend_id(j + 1)
         fig.add_trace(
-            go.Scatter(x=t, y=pred[:, j], mode="lines", name=f"Pred {name}", showlegend=(j == 0)),
+            go.Scatter(
+                x=t,
+                y=pred[:, j],
+                mode="lines",
+                name="Prediction",
+                legend=legend,
+                showlegend=True,
+            ),
             row=j + 1,
             col=1,
         )
@@ -382,21 +429,17 @@ def plot_predictions(
                     x=true_t,
                     y=true_y[:, j],
                     mode="lines",
-                    name=f"OpenSim {name}",
+                    name="True (OpenSim)",
                     line=dict(dash="dash"),
-                    showlegend=(j == 0),
+                    legend=legend,
+                    showlegend=True,
                 ),
                 row=j + 1,
                 col=1,
             )
-        fig.update_yaxes(title_text="Angle (deg)", row=j + 1, col=1)
-    fig.update_xaxes(title_text="Time (s)", row=3, col=1)
-    fig.update_layout(
-        title=f"Level-ground walking kinematics — window {window_index}",
-        height=900,
-        margin=dict(l=40, r=20, t=60, b=40),
+    return _style_joint_subplots(
+        fig, f"Level-ground walking kinematics — window {window_index}"
     )
-    return fig
 
 
 def plot_stitched(
@@ -408,8 +451,16 @@ def plot_stitched(
     t = np.arange(stitched.shape[0]) / TARGET_FS
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, subplot_titles=JOINT_NAMES)
     for j, name in enumerate(JOINT_NAMES):
+        legend = _joint_legend_id(j + 1)
         fig.add_trace(
-            go.Scatter(x=t, y=stitched[:, j], mode="lines", name=f"Pred {name}", showlegend=(j == 0)),
+            go.Scatter(
+                x=t,
+                y=stitched[:, j],
+                mode="lines",
+                name="Prediction",
+                legend=legend,
+                showlegend=True,
+            ),
             row=j + 1,
             col=1,
         )
@@ -419,21 +470,17 @@ def plot_stitched(
                     x=true_t,
                     y=true_y[:, j],
                     mode="lines",
-                    name=f"OpenSim {name}",
+                    name="True (OpenSim)",
                     line=dict(dash="dash"),
-                    showlegend=(j == 0),
+                    legend=legend,
+                    showlegend=True,
                 ),
                 row=j + 1,
                 col=1,
             )
-        fig.update_yaxes(title_text="Angle (deg)", row=j + 1, col=1)
-    fig.update_xaxes(title_text="Time (s)", row=3, col=1)
-    fig.update_layout(
-        title="Stitched level-ground walking kinematics (pred vs OpenSim)",
-        height=900,
-        margin=dict(l=40, r=20, t=60, b=40),
+    return _style_joint_subplots(
+        fig, "Stitched level-ground walking kinematics (pred vs OpenSim)"
     )
-    return fig
 
 
 def plot_imu_preview(time: np.ndarray, imu: np.ndarray, title: str) -> go.Figure:
@@ -528,11 +575,6 @@ def render_error_metrics(eval_pred_t: np.ndarray, eval_pred_y: np.ndarray, true_
             true_y,
             float(eval_start),
             float(eval_end),
-        )
-        st.caption(
-            f"RMSE / MAE / %ROM on stitched pred vs OpenSim in [{eval_start:.2f}, {eval_end:.2f}] s "
-            f"(same knee sign convention as the plot). "
-            f"RMSE_pctROM = 100 × RMSE / OpenSim ROM in the window."
         )
         st.dataframe(
             metrics_df.style.format(
